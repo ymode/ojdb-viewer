@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OJDB Viewer
+Comment=Our Jank Database Viewer - Browse and explore SQLite database files
+Exec=/home/azuredev/dev/sqlite-viewer/run.sh
+Icon=/home/azuredev/dev/sqlite-viewer/icon.png
+Terminal=false
+Categories=Development;Database;
+MimeType=application/x-sqlite3;application/vnd.sqlite3;
+StartupNotify=true
+Keywords=sqlite;database;browser;sql;ojdb;jank; 
