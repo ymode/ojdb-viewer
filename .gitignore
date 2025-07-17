@@ -204,9 +204,9 @@ $RECYCLE.BIN/
 *SQLiteBrowser*.zip
 
 # Database files (optional - you might want to keep example databases)
-# *.db
-# *.sqlite
-# *.sqlite3
+*.db
+*.sqlite
+*.sqlite3
 
 # Temporary extraction directories
 OJDBViewer-*-portable/
