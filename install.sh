@@ -20,18 +20,18 @@ fi
 # Install system dependencies
 echo "📦 Installing system dependencies..."
 if command -v pacman >/dev/null 2>&1; then
-    # Arch / Omarchy / Manjaro. qt5-wayland gives native Wayland (Hyprland) support
-    pacman -S --needed --noconfirm python python-pyqt5 qt5-wayland desktop-file-utils
+    # Arch / Omarchy / Manjaro. qt6-wayland gives native Wayland (Hyprland) support
+    pacman -S --needed --noconfirm python python-pyqt6 qt6-wayland desktop-file-utils
 elif command -v apt-get >/dev/null 2>&1; then
     # Debian / Ubuntu
     apt-get update
-    apt-get install -y python3 python3-venv python3-pyqt5 desktop-file-utils
+    apt-get install -y python3 python3-venv python3-pyqt6 desktop-file-utils
 elif command -v dnf >/dev/null 2>&1; then
     # Fedora
-    dnf install -y python3 python3-qt5 desktop-file-utils
+    dnf install -y python3 python3-pyqt6 desktop-file-utils
 else
     echo "⚠️ Unknown package manager - skipping system packages."
-    echo "   Make sure python3 (with venv) is installed; PyQt5 will be installed with pip."
+    echo "   Make sure python3 (with venv) is installed; PyQt6 will be installed with pip."
 fi
 
 # Create installation directory
@@ -49,9 +49,9 @@ cp README.md "$INSTALL_DIR/"
 # Create virtual environment and install dependencies
 echo "🐍 Setting up Python environment..."
 cd "$INSTALL_DIR"
-# Reuse the distro's PyQt5 when present; fall back to pip otherwise
+# Reuse the distro's PyQt6 when present; fall back to pip otherwise
 python3 -m venv --system-site-packages venv
-if ! venv/bin/python -c "import PyQt5.QtWidgets" >/dev/null 2>&1; then
+if ! venv/bin/python -c "import PyQt6.QtWidgets" >/dev/null 2>&1; then
     venv/bin/pip install -r requirements.txt
 fi
 

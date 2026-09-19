@@ -1,6 +1,6 @@
 # OJDB Viewer (Our Jank Database Viewer)
 
-A Python Qt5 application for browsing and exploring SQLite database files.
+A Python Qt6 application for browsing and exploring SQLite database files.
 
 ## Features
 
@@ -79,11 +79,11 @@ pip install -e ".[test]"
 pytest
 ```
 
-The GUI tests run headless (Qt's `offscreen` platform), so no display is needed. They are skipped if PyQt5 isn't installed. The suite also runs on every push via GitHub Actions.
+The GUI tests run headless (Qt's `offscreen` platform), so no display is needed. They are skipped if PyQt6 isn't installed. The suite also runs on every push via GitHub Actions.
 
 ## Technical Details
 
-- Built with PyQt5 for cross-platform compatibility
+- Built with PyQt6 for cross-platform compatibility
 - Uses SQLite3 for database operations
 - Implements threading to prevent UI freezing during large queries
 - Supports pagination for efficient handling of large datasets
@@ -92,7 +92,7 @@ The GUI tests run headless (Qt's `offscreen` platform), so no display is needed.
 ## System Requirements
 
 - Python 3.6+
-- PyQt5
+- PyQt6
 - SQLite3 (included with Python)
 - Linux, Windows, or macOS
 
@@ -113,7 +113,7 @@ Install system-wide with desktop integration:
 ```bash
 sudo ./install.sh
 ```
-Supported: Arch-based distros (Arch, Omarchy, Manjaro) via `pacman`, Debian/Ubuntu via `apt`, and Fedora via `dnf`. On anything else the script skips system packages and installs PyQt5 with pip.
+Supported: Arch-based distros (Arch, Omarchy, Manjaro) via `pacman`, Debian/Ubuntu via `apt`, and Fedora via `dnf`. On anything else the script skips system packages and installs PyQt6 with pip.
 This creates:
 - Menu entry: Applications → Development → OJDB Viewer
 - Terminal command: `ojdb-viewer`
