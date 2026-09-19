@@ -1,3 +1,4 @@
+import csv
 import os
 import sqlite3
 import sys
@@ -7,7 +8,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ojdb_core import (build_table_queries, build_where, connect_readonly,
-                       format_cell, quote_ident, validate_database)
+                       export_csv, format_cell, quote_ident, validate_database)
 
 
 @pytest.fixture
@@ -112,3 +113,20 @@ def test_format_cell():
     assert format_cell(42) == ("42", False)
     assert format_cell(b"\x00" * 2048) == ("<BLOB 2.0 KB>", True)
     assert format_cell(b"ab") == ("<BLOB 2 B>", True)
+
+
+def test_export_csv_all_rows(db_path, tmp_path):
+    out = tmp_path / "out.csv"
+    count = export_csv(db_path, str(out), "order", COLUMNS, order_by="qty")
+    assert count == 3
+    with open(out, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    assert rows[0] == COLUMNS
+    assert [r[2] for r in rows[1:]] == ["9", "10", "123"]
+    # NULL is empty, BLOB is hex
+    assert rows[1][4] == "" and rows[2][4] == "0x0001"
+
+
+def test_export_csv_respects_filter(db_path, tmp_path):
+    out = tmp_path / "out.csv"
+    assert export_csv(db_path, str(out), "order", COLUMNS, "alpha", "my col") == 1

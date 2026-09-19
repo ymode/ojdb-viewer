@@ -3,6 +3,7 @@ OJDB Viewer core helpers
 Database access and query building, kept free of Qt so it can be tested.
 """
 
+import csv
 import os
 import sqlite3
 from urllib.parse import quote
@@ -63,7 +64,10 @@ def build_where(columns, search_text, selected_column=None):
 
 def build_table_queries(table, columns, search_text="", selected_column=None,
                         order_by=None, descending=False, limit=100, offset=0):
-    """Return (data_query, count_query, params) for one page of a table"""
+    """Return (data_query, count_query, params) for one page of a table.
+
+    limit=None returns every matching row.
+    """
     where, params = build_where(columns, search_text, selected_column)
     base = f"FROM {quote_ident(table)}{where}"
 
@@ -71,7 +75,8 @@ def build_table_queries(table, columns, search_text="", selected_column=None,
     if order_by in columns:
         direction = "DESC" if descending else "ASC"
         data_query += f" ORDER BY {quote_ident(order_by)} {direction}"
-    data_query += f" LIMIT {int(limit)} OFFSET {int(offset)}"
+    if limit is not None:
+        data_query += f" LIMIT {int(limit)} OFFSET {int(offset)}"
 
     return data_query, f"SELECT COUNT(*) {base}", params
 
@@ -92,3 +97,37 @@ def format_cell(value):
     if isinstance(value, (bytes, bytearray, memoryview)):
         return f"<BLOB {format_size(len(value))}>", True
     return str(value), False
+
+
+def csv_value(value):
+    """CSV representation of a cell: NULL is empty, BLOBs are hex"""
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "0x" + bytes(value).hex()
+    return value
+
+
+def export_csv(db_path, out_path, table, columns, search_text="",
+               selected_column=None, order_by=None, descending=False):
+    """Write every row matching the current view to out_path; returns row count"""
+    query, _, params = build_table_queries(
+        table, columns, search_text, selected_column, order_by, descending, limit=None)
+
+    conn = connect_readonly(db_path)
+    try:
+        cursor = conn.execute(query, params)
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([description[0] for description in cursor.description])
+            row_count = 0
+            # Stream in chunks so large tables aren't held in memory
+            while True:
+                rows = cursor.fetchmany(1000)
+                if not rows:
+                    break
+                writer.writerows([csv_value(v) for v in row] for row in rows)
+                row_count += len(rows)
+        return row_count
+    finally:
+        conn.close()
