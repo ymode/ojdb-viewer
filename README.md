@@ -75,9 +75,11 @@ python sqlite_browser.py
 ## Running the Tests
 
 ```bash
-pip install pytest
-pytest tests
+pip install -e ".[test]"
+pytest
 ```
+
+The GUI tests run headless (Qt's `offscreen` platform), so no display is needed. They are skipped if PyQt5 isn't installed. The suite also runs on every push via GitHub Actions.
 
 ## Technical Details
 
@@ -98,7 +100,15 @@ pytest tests
 
 ### For End Users
 
-#### Option 1: System Installation (Recommended)
+#### Option 1: Install as a Python Tool (no root needed)
+```bash
+uv tool install git+https://github.com/ymode/ojdb-viewer
+# or
+pipx install git+https://github.com/ymode/ojdb-viewer
+```
+This puts an `ojdb-viewer` command on your PATH: `ojdb-viewer path/to/file.db`. It does not add a menu entry or file association; use the system installation below for those.
+
+#### Option 2: System Installation
 Install system-wide with desktop integration:
 ```bash
 sudo ./install.sh
@@ -114,7 +124,7 @@ To uninstall:
 sudo ./uninstall.sh
 ```
 
-#### Option 2: Portable Package
+#### Option 3: Portable Package
 Create a portable version that users can run anywhere:
 ```bash
 ./create_package.sh
@@ -124,7 +134,7 @@ This creates `.tar.gz` and `.zip` files containing:
 - All necessary files
 - No system installation required
 
-#### Option 3: Standalone Executable
+#### Option 4: Standalone Executable
 Create a single-file executable (requires more disk space):
 ```bash
 python3 build_executable.py

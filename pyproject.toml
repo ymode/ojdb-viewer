@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ojdb-viewer"
+version = "1.0.0"
+description = "OJDB Viewer (Our Jank Database Viewer) - browse and explore SQLite database files"
+readme = "README.md"
+license = { text = "Unlicense" }
+requires-python = ">=3.9"
+dependencies = ["PyQt5>=5.15.0"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.gui-scripts]
+ojdb-viewer = "sqlite_browser:main"
+
+[tool.setuptools]
+py-modules = ["sqlite_browser", "ojdb_core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
