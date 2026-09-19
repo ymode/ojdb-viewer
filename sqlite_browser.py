@@ -11,13 +11,14 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QTableView, QAbstractItemView,
                              QTreeWidget, QTreeWidgetItem, QSplitter, QFileDialog,
                              QMessageBox, QLineEdit, QLabel, QHeaderView, QTabWidget,
-                             QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QStatusBar)
+                             QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QStatusBar,
+                             QCheckBox, QDockWidget, QMenu)
 from PyQt6.QtCore import (Qt, QAbstractTableModel, QModelIndex, QSettings, QThread, QTimer,
                           pyqtSignal)
-from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QPixmap, QShortcut
 
-from ojdb_core import (build_table_queries, connect_readonly, csv_value, export_csv, format_cell,
-                       quote_ident, validate_database)
+from ojdb_core import (build_table_queries, connect_readonly, csv_value, describe_value,
+                       export_csv, format_cell, read_structure, validate_database)
 
 
 class DatabaseWorker(QThread):
@@ -142,6 +143,10 @@ class ResultModel(QAbstractTableModel):
             return self.columns[section]
         return str(self.row_offset + section + 1)
     
+    def value(self, index):
+        """The raw database value behind a cell"""
+        return self.rows[index.row()][index.column()]
+    
     def copy_text(self, index):
         """Clipboard text for a cell: NULL is empty, BLOBs are hex"""
         return str(csv_value(self.rows[index.row()][index.column()]))
@@ -229,6 +234,7 @@ class ExportWorker(QThread):
 
 MAX_RECENT_FILES = 10
 MAX_QUERY_ROWS = 10000  # Cap on rows shown for a user-written query
+SAMPLE_DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test.db")
 
 
 class SQLiteBrowser(QMainWindow):
@@ -247,6 +253,9 @@ class SQLiteBrowser(QMainWindow):
         self.settings = QSettings()
         self.query_request_id = 0
         self.query_worker = None
+        self.structure = {"tables": [], "views": [], "indexes": []}
+        self.table_items = {}  # Table/view name -> tree item
+        self.foreign_keys = {}  # Column of the current table -> (table, column) it references
         
         # Debounce typing so each keystroke doesn't start a query
         self.search_timer = QTimer(self)
@@ -305,6 +314,12 @@ class SQLiteBrowser(QMainWindow):
         splitter.setStretchFactor(0, 0)  # Tree doesn't stretch
         splitter.setStretchFactor(1, 1)  # Data area stretches
         
+        # Cell details dock, hidden until asked for
+        self.create_detail_dock()
+        
+        # Open databases dropped onto the window
+        self.setAcceptDrops(True)
+        
         # Create status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -319,6 +334,9 @@ class SQLiteBrowser(QMainWindow):
         splitter_state = self.settings.value("splitterState")
         if splitter_state:
             self.splitter.restoreState(splitter_state)
+        window_state = self.settings.value("windowState")
+        if window_state:
+            self.restoreState(window_state)
         
     
     def create_menu_bar(self):
@@ -374,9 +392,17 @@ class SQLiteBrowser(QMainWindow):
         toggle_tree_action.setShortcut('Ctrl+T')
         toggle_tree_action.setStatusTip('Show/hide database structure tree')
         toggle_tree_action.triggered.connect(self.toggle_tree_visibility)
+        self.view_menu = view_menu  # The cell details toggle is added once its dock exists
         
         # Help menu
         help_menu = menubar.addMenu('&Help')
+        
+        # Sample database, when it was installed alongside the app
+        if os.path.exists(SAMPLE_DATABASE):
+            sample_action = help_menu.addAction('Open &Sample Database')
+            sample_action.setStatusTip('Open the test.db sample shipped with OJDB Viewer')
+            sample_action.triggered.connect(lambda: self.load_database(SAMPLE_DATABASE))
+            help_menu.addSeparator()
         
         # About action
         about_action = help_menu.addAction('&About')
@@ -446,7 +472,8 @@ class SQLiteBrowser(QMainWindow):
             table=self.current_table, columns=self.current_columns,
             search_text=self.search_input.text(),
             selected_column=self.column_combo.currentText(),
-            order_by=self.sort_column, descending=self.sort_descending)
+            order_by=self.sort_column, descending=self.sort_descending,
+            exact=self.exact_checkbox.isChecked())
         worker.export_done.connect(self.export_finished)
         worker.error_occurred.connect(self.export_failed)
         worker.finished.connect(lambda w=worker: self.worker_finished(w))
@@ -488,6 +515,7 @@ class SQLiteBrowser(QMainWindow):
                          "• View table data with pagination\n"
                          "• Search and filter data\n"
                          "• Run read-only SQL queries\n"
+                         "• Inspect cells and follow foreign keys\n"
                          "• Export data to CSV\n"
                          "• View database schema\n\n"
                          "Built with Python and PyQt6")
@@ -516,6 +544,11 @@ class SQLiteBrowser(QMainWindow):
         self.column_combo.setMinimumWidth(150)
         filter_layout.addWidget(self.column_combo)
         
+        self.exact_checkbox = QCheckBox("Exact")
+        self.exact_checkbox.setToolTip("Match the whole value instead of part of it")
+        self.exact_checkbox.toggled.connect(self.apply_filter)
+        filter_layout.addWidget(self.exact_checkbox)
+        
         self.clear_filter_button = QPushButton("Clear")
         self.clear_filter_button.clicked.connect(self.clear_filter)
         self.clear_filter_button.setMaximumWidth(80)
@@ -532,6 +565,7 @@ class SQLiteBrowser(QMainWindow):
         self.table_view.horizontalHeader().setSectionsClickable(True)
         self.table_view.horizontalHeader().sectionClicked.connect(self.header_clicked)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.connect_cell_actions(self.table_view)
         layout.addWidget(self.table_view)
         
         # Pagination controls
@@ -622,6 +656,7 @@ class SQLiteBrowser(QMainWindow):
         # Results
         self.query_model = ResultModel(self)
         self.query_view = create_result_view(self.query_model)
+        self.connect_cell_actions(self.query_view)
         query_splitter.addWidget(self.query_view)
         
         query_splitter.setSizes([200, 500])
@@ -691,6 +726,138 @@ class SQLiteBrowser(QMainWindow):
         if request_id == self.query_request_id:
             self.set_query_status(error_message, is_error=True)
     
+    def create_detail_dock(self):
+        """Create the dock that shows the full contents of one cell"""
+        self.detail_dock = QDockWidget("Cell Details", self)
+        self.detail_dock.setObjectName("cellDetailsDock")
+        
+        detail_widget = QWidget()
+        layout = QVBoxLayout(detail_widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        
+        self.detail_summary = QLabel("Select a cell to see its full contents")
+        self.detail_summary.setStyleSheet("font-weight: bold; color: #666;")
+        layout.addWidget(self.detail_summary)
+        
+        self.detail_image = QLabel()
+        self.detail_image.hide()
+        layout.addWidget(self.detail_image)
+        
+        self.detail_text = QPlainTextEdit()
+        self.detail_text.setReadOnly(True)
+        self.detail_text.setFont(QFont("Courier", 10))
+        layout.addWidget(self.detail_text)
+        
+        self.detail_dock.setWidget(detail_widget)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.detail_dock)
+        self.detail_dock.hide()
+        
+        toggle_details_action = self.detail_dock.toggleViewAction()
+        toggle_details_action.setText('Cell &Details')
+        toggle_details_action.setShortcut('Ctrl+D')
+        toggle_details_action.setStatusTip('Show/hide the full contents of the selected cell')
+        self.view_menu.addAction(toggle_details_action)
+        # Fill the pane in when it is opened with a cell already selected
+        self.detail_dock.visibilityChanged.connect(lambda visible: visible and self.refresh_details())
+    
+    def connect_cell_actions(self, view):
+        """Wire a result view up to the details dock and the cell context menu"""
+        view.selectionModel().currentChanged.connect(
+            lambda current, previous, v=view: self.show_details(v, current))
+        view.model().modelReset.connect(lambda v=view: self.show_details(v, QModelIndex()))
+        view.doubleClicked.connect(lambda index, v=view: self.open_details(v, index))
+        view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        view.customContextMenuRequested.connect(lambda pos, v=view: self.show_cell_menu(v, pos))
+    
+    def refresh_details(self):
+        """Show the current cell of whichever result view is on screen"""
+        view = self.query_view if self.tab_widget.currentIndex() == 1 else self.table_view
+        self.show_details(view, view.currentIndex())
+    
+    def open_details(self, view, index):
+        """Open the details dock on a cell"""
+        self.detail_dock.show()
+        self.show_details(view, index)
+    
+    def show_details(self, view, index):
+        """Fill the details dock from a cell"""
+        if not self.detail_dock.isVisible():
+            return
+        self.detail_image.hide()
+        if not index.isValid():
+            self.detail_summary.setText("Select a cell to see its full contents")
+            self.detail_text.setPlainText("")
+            return
+        
+        model = view.model()
+        value = model.value(index)
+        summary, text = describe_value(value)
+        
+        if isinstance(value, (bytes, bytearray)):
+            pixmap = QPixmap()
+            if pixmap.loadFromData(bytes(value)):
+                summary += f", {pixmap.width()}x{pixmap.height()} image"
+                # Keep previews a sensible size: shrink photos, enlarge icons
+                longest = max(pixmap.width(), pixmap.height())
+                if longest > 256:
+                    pixmap = pixmap.scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
+                elif longest < 64:
+                    pixmap = pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.FastTransformation)
+                self.detail_image.setPixmap(pixmap)
+                self.detail_image.show()
+        
+        self.detail_summary.setText(f"{model.columns[index.column()]}: {summary}")
+        self.detail_text.setPlainText(text)
+    
+    def reference_for(self, view, index):
+        """(table, column, value) a data cell points at through a foreign key, or None"""
+        if view is not self.table_view or not index.isValid():
+            return None
+        value = self.table_model.value(index)
+        reference = self.foreign_keys.get(self.table_model.columns[index.column()])
+        if reference is None or value is None:
+            return None
+        return reference[0], reference[1], value
+    
+    def show_cell_menu(self, view, pos):
+        """Context menu for a result cell"""
+        index = view.indexAt(pos)
+        if not index.isValid():
+            return
+        
+        menu = QMenu(view)
+        menu.addAction("&Copy").triggered.connect(lambda: copy_selection(view))
+        menu.addAction("View Cell &Details").triggered.connect(lambda: self.open_details(view, index))
+        
+        reference = self.reference_for(view, index)
+        if reference:
+            table, column, value = reference
+            menu.addSeparator()
+            action = menu.addAction(f"&Go to {table} where {column} = {value}")
+            action.triggered.connect(lambda: self.follow_reference(table, column, value))
+        
+        menu.exec(view.viewport().mapToGlobal(pos))
+    
+    def follow_reference(self, table, column, value):
+        """Jump to the row a foreign key points at"""
+        self.select_table(table, column=column, search_text=str(value), exact=True)
+    
+    def dragEnterEvent(self, event):
+        """Accept files dragged onto the window"""
+        if any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+    
+    def dropEvent(self, event):
+        """Open the first dropped file as a database"""
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                event.acceptProposedAction()
+                self.load_database(url.toLocalFile())
+                break
+    
     def create_schema_tab(self):
         """Create the schema viewing tab"""
         self.schema_text = QTextEdit()
@@ -725,6 +892,7 @@ class SQLiteBrowser(QMainWindow):
             self.db_path = os.path.abspath(db_path)
             self.current_table = None
             self.current_columns = []
+            self.foreign_keys = {}
             self.request_id += 1  # Drop results still in flight for the old database
             self.table_model.set_results([], [])
             # Results from the previous database no longer apply
@@ -751,48 +919,56 @@ class SQLiteBrowser(QMainWindow):
             return
         
         self.tree_widget.clear()
+        self.table_items = {}
         
         try:
-            conn = connect_readonly(self.db_path)
-            cursor = conn.cursor()
+            self.structure = read_structure(self.db_path)
+        except Exception as e:
+            self.structure = {"tables": [], "views": [], "indexes": []}
+            QMessageBox.critical(self, "Error", f"Failed to read database structure:\n{str(e)}")
+            return
+        
+        # Create root item
+        root = QTreeWidgetItem(self.tree_widget)
+        root.setText(0, os.path.basename(self.db_path))
+        root.setExpanded(True)
+        
+        # Tables and views are both browsable, so they share an item type
+        for label, key in (("Tables", "tables"), ("Views", "views")):
+            entries = self.structure[key]
+            if key == "views" and not entries:
+                continue
+            group_item = QTreeWidgetItem(root)
+            group_item.setText(0, f"{label} ({len(entries)})")
+            group_item.setExpanded(True)
             
-            # Get all tables
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-            tables = cursor.fetchall()
-            
-            # Create root item
-            root = QTreeWidgetItem(self.tree_widget)
-            root.setText(0, os.path.basename(self.db_path))
-            root.setExpanded(True)
-            
-            # Add tables
-            tables_item = QTreeWidgetItem(root)
-            tables_item.setText(0, f"Tables ({len(tables)})")
-            tables_item.setExpanded(True)
-            
-            for table_name, in tables:
-                table_item = QTreeWidgetItem(tables_item)
-                table_item.setText(0, table_name)
-                table_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'table', 'name': table_name})
+            for entry in entries:
+                table_item = QTreeWidgetItem(group_item)
+                table_item.setText(0, entry["name"])
+                table_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'table', 'name': entry["name"]})
+                self.table_items[entry["name"]] = table_item
                 
-                # Get column info
-                cursor.execute(f"PRAGMA table_info({quote_ident(table_name)})")
-                columns = cursor.fetchall()
-                
-                for column_info in columns:
-                    col_name = column_info[1]
-                    col_type = column_info[2]
-                    is_pk = " (PK)" if column_info[5] else ""
-                    is_nullable = "" if column_info[3] else " (NOT NULL)"
+                for column in entry["columns"]:
+                    is_pk = " (PK)" if column["pk"] else ""
+                    is_nullable = " (NOT NULL)" if column["not_null"] else ""
+                    is_fk = f" (FK → {column['fk'][0]}.{column['fk'][1]})" if column["fk"] else ""
                     
                     column_item = QTreeWidgetItem(table_item)
-                    column_item.setText(0, f"{col_name}: {col_type}{is_pk}{is_nullable}")
-                    column_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'column', 'table': table_name, 'name': col_name})
+                    column_item.setText(0, f"{column['name']}: {column['type']}{is_pk}{is_nullable}{is_fk}")
+                    column_item.setData(0, Qt.ItemDataRole.UserRole,
+                                        {'type': 'column', 'table': entry["name"], 'name': column["name"]})
+        
+        indexes = self.structure["indexes"]
+        if indexes:
+            indexes_item = QTreeWidgetItem(root)
+            indexes_item.setText(0, f"Indexes ({len(indexes)})")
             
-            conn.close()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to read database structure:\n{str(e)}")
+            for index in indexes:
+                is_unique = " (UNIQUE)" if index["unique"] else ""
+                index_item = QTreeWidgetItem(indexes_item)
+                index_item.setText(0, f"{index['name']} on {index['table']}{is_unique}")
+                for column_name in index["columns"]:
+                    QTreeWidgetItem(index_item).setText(0, column_name)
     
     def load_schema(self):
         """Load database schema into schema tab"""
@@ -820,14 +996,33 @@ class SQLiteBrowser(QMainWindow):
         """Handle tree item click"""
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if data and data.get('type') == 'table':
-            self.current_table = data['name']
-            self.current_offset = 0
-            self.sort_column = None
-            self.sort_descending = False
-            self.update_column_combo()
-            self.export_action.setEnabled(True)
-            self.load_table_data()
-            self.tab_widget.setCurrentIndex(0)  # Switch to data tab
+            self.select_table(data['name'])
+    
+    def select_table(self, name, column=None, search_text=None, exact=False):
+        """Show a table or view, optionally filtered.
+        
+        search_text=None keeps whatever is in the search box.
+        """
+        self.current_table = name
+        self.current_offset = 0
+        self.sort_column = None
+        self.sort_descending = False
+        self.update_column_combo()
+        
+        # Set the filter widgets without each one triggering its own reload
+        self.updating_combo = True
+        if search_text is not None:
+            self.search_input.setText(search_text)
+        if column in self.current_columns:
+            self.column_combo.setCurrentText(column)
+        self.exact_checkbox.setChecked(exact)
+        self.updating_combo = False
+        
+        if name in self.table_items:
+            self.tree_widget.setCurrentItem(self.table_items[name])
+        self.export_action.setEnabled(True)
+        self.load_table_data()
+        self.tab_widget.setCurrentIndex(0)  # Switch to data tab
     
     def load_table_data(self):
         """Load data for current table"""
@@ -841,7 +1036,8 @@ class SQLiteBrowser(QMainWindow):
             search_text=self.search_input.text(),
             selected_column=self.column_combo.currentText(),
             order_by=self.sort_column, descending=self.sort_descending,
-            limit=self.rows_per_page, offset=self.current_offset)
+            limit=self.rows_per_page, offset=self.current_offset,
+            exact=self.exact_checkbox.isChecked())
         
         # Execute query in worker thread
         self.request_id += 1
@@ -906,27 +1102,18 @@ class SQLiteBrowser(QMainWindow):
         if not self.db_path or not self.current_table:
             return
         
-        try:
-            # Set flag to prevent recursion
-            self.updating_combo = True
-            
-            conn = connect_readonly(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute(f"PRAGMA table_info({quote_ident(self.current_table)})")
-            columns = cursor.fetchall()
-            conn.close()
-            
-            self.current_columns = [column_info[1] for column_info in columns]
-            
-            self.column_combo.clear()
-            self.column_combo.addItem("All Columns")
-            self.column_combo.addItems(self.current_columns)
-                
-        except Exception as e:
-            print(f"Error updating column combo: {e}")
-        finally:
-            # Always reset flag
-            self.updating_combo = False
+        entry = next((e for e in self.structure["tables"] + self.structure["views"]
+                      if e["name"] == self.current_table), None)
+        columns = entry["columns"] if entry else []
+        self.current_columns = [column["name"] for column in columns]
+        self.foreign_keys = {column["name"]: column["fk"] for column in columns if column["fk"]}
+        
+        # Set flag to prevent recursion
+        self.updating_combo = True
+        self.column_combo.clear()
+        self.column_combo.addItem("All Columns")
+        self.column_combo.addItems(self.current_columns)
+        self.updating_combo = False
     
     def update_pagination_info(self, total_rows):
         """Update pagination controls with total count"""
@@ -968,6 +1155,7 @@ class SQLiteBrowser(QMainWindow):
         self.updating_combo = True  # Reload once below, not once per widget
         self.search_input.clear()
         self.column_combo.setCurrentIndex(0)
+        self.exact_checkbox.setChecked(False)
         self.updating_combo = False
         if self.current_table:
             self.current_offset = 0
@@ -982,6 +1170,7 @@ class SQLiteBrowser(QMainWindow):
         self.search_timer.stop()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("splitterState", self.splitter.saveState())
+        self.settings.setValue("windowState", self.saveState())
         for worker in list(self.workers):
             if hasattr(worker, "cancel"):
                 worker.cancel()  # Don't let a runaway query block exit

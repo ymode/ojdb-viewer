@@ -4,8 +4,9 @@ import sqlite3
 
 import pytest
 
-from ojdb_core import (build_table_queries, build_where, connect_readonly,
-                       export_csv, format_cell, quote_ident, validate_database)
+from ojdb_core import (build_table_queries, build_where, connect_readonly, describe_value,
+                       export_csv, format_cell, hex_dump, quote_ident, read_structure,
+                       validate_database)
 
 
 @pytest.fixture
@@ -127,3 +128,84 @@ def test_export_csv_all_rows(db_path, tmp_path):
 def test_export_csv_respects_filter(db_path, tmp_path):
     out = tmp_path / "out.csv"
     assert export_csv(db_path, str(out), "order", COLUMNS, "alpha", "my col") == 1
+
+
+def test_exact_match(db_path):
+    # Substring search for 1 also finds 10 and 123; exact does not
+    query, _, params = build_table_queries("order", COLUMNS, "1", "qty")
+    assert len(run(db_path, query, params)) == 2
+    query, _, params = build_table_queries("order", COLUMNS, "10", "qty", exact=True)
+    assert [row[2] for row in run(db_path, query, params)] == [10]
+    # Wildcards are literal in exact mode too
+    query, _, params = build_table_queries("order", COLUMNS, "%", "my col", exact=True)
+    assert run(db_path, query, params) == []
+
+
+@pytest.fixture
+def relational_db(tmp_path):
+    path = tmp_path / "rel.db"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE parent (id INTEGER PRIMARY KEY, code TEXT UNIQUE);
+        CREATE TABLE "child table" (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER NOT NULL REFERENCES parent(id),
+            implicit_id INTEGER REFERENCES parent,
+            label TEXT
+        );
+        CREATE INDEX idx_child_parent ON "child table"(parent_id, label);
+        CREATE INDEX idx_child_expr ON "child table"(lower(label));
+        CREATE VIEW child_view AS SELECT id, label FROM "child table";
+        CREATE VIEW broken_view AS SELECT * FROM parent;
+    """)
+    conn.execute("ALTER TABLE parent RENAME TO parent2")  # keeps the view valid in new SQLite
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_read_structure(relational_db):
+    structure = read_structure(relational_db)
+    tables = {table["name"]: table for table in structure["tables"]}
+    assert set(tables) == {"parent2", "child table"}
+
+    child = {column["name"]: column for column in tables["child table"]["columns"]}
+    assert child["id"]["pk"] and not child["label"]["not_null"]
+    assert child["parent_id"]["not_null"]
+    assert child["parent_id"]["fk"] == ("parent2", "id")
+    # REFERENCES without a column resolves to the primary key
+    assert child["implicit_id"]["fk"] == ("parent2", "id")
+    assert child["label"]["fk"] is None
+
+    views = {view["name"]: view for view in structure["views"]}
+    assert [column["name"] for column in views["child_view"]["columns"]] == ["id", "label"]
+
+    indexes = {index["name"]: index for index in structure["indexes"]}
+    assert indexes["idx_child_parent"]["columns"] == ["parent_id", "label"]
+    assert indexes["idx_child_parent"]["table"] == "child table"
+    assert not indexes["idx_child_parent"]["unique"]
+    assert indexes["idx_child_expr"]["columns"] == ["<expression>"]
+    assert any(index["unique"] and index["table"] == "parent2" for index in indexes.values())
+
+
+def test_describe_value():
+    assert describe_value(None) == ("NULL", "")
+    assert describe_value(7) == ("Integer", "7")
+    assert describe_value(1.5) == ("Real", "1.5")
+    assert describe_value("plain") == ("Text, 5 characters", "plain")
+
+    summary, text = describe_value('{"b": [1, 2], "a": "é"}')
+    assert summary.startswith("JSON text")
+    assert text == '{\n  "b": [\n    1,\n    2\n  ],\n  "a": "é"\n}'
+    # Looks like JSON but isn't: shown as ordinary text
+    assert describe_value("{not json")[0] == "Text, 9 characters"
+
+    summary, text = describe_value(b"\x89PNG\r\n")
+    assert summary == "BLOB, 6 B"
+    assert text == "00000000  89 50 4e 47 0d 0a" + " " * 32 + ".PNG.."
+
+
+def test_hex_dump_truncates():
+    dump = hex_dump(b"\x00" * 5000, limit=32)
+    assert dump.splitlines()[-1] == "... 4.9 KB more not shown"
+    assert len(dump.splitlines()) == 3

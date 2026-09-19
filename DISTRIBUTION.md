@@ -58,6 +58,8 @@ Host the files on a web server and provide download links.
 - `run_portable.sh` - Linux/Mac launcher
 - `run_portable.bat` - Windows launcher
 - `requirements.txt` - Dependencies list
+- `ojdb_core.py` - Database helpers used by the main application
+- `test.db` - Sample database (built by `tools/make_test_db.py`)
 - `icon.png` - Application icon
 - `README.md` - Documentation
 - `INSTALL.txt` - Quick start guide
