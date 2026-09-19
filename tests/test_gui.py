@@ -7,7 +7,8 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets")
 
-from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtCore import QMimeData, QPointF, QSettings, Qt, QUrl
+from PyQt6.QtGui import QDropEvent
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 import sqlite_browser as sb
@@ -51,6 +52,13 @@ def window(app, errors, tmp_path):
     window.show()
     yield window
     window.close()
+
+
+SAMPLE_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "test.db")
+
+
+def tree_labels(item):
+    return [item.child(i).text(0) for i in range(item.childCount())]
 
 
 def pump(app, condition, timeout=10):
@@ -202,3 +210,112 @@ def test_runaway_query_can_be_cancelled(app, window, db_path):
     pump(app, lambda: window.query_worker is None)
     assert "interrupt" in window.query_status.text().lower()
     assert window.run_query_button.text() == "Run"
+
+
+def test_sample_database_is_current(tmp_path):
+    """test.db must match what tools/make_test_db.py generates"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "make_test_db", os.path.join(os.path.dirname(SAMPLE_DB), "tools", "make_test_db.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fresh = tmp_path / "fresh.db"
+    module.build(str(fresh))
+    
+    def dump(path):
+        conn = sqlite3.connect(path)
+        try:
+            return list(conn.iterdump())
+        finally:
+            conn.close()
+    
+    assert dump(SAMPLE_DB) == dump(str(fresh))
+
+
+def test_tree_shows_views_indexes_and_foreign_keys(app, window):
+    assert window.load_database(SAMPLE_DB)
+    root = window.tree_widget.topLevelItem(0)
+    assert tree_labels(root) == ["Tables (4)", "Views (2)", "Indexes (7)"]
+    
+    tables, views, indexes = (root.child(i) for i in range(3))
+    assert tree_labels(tables) == ["customers", "order", "order_items", "products"]
+    assert "customer_id: INTEGER (NOT NULL) (FK → customers.id)" in tree_labels(tables.child(1))
+    assert "order_id: INTEGER (NOT NULL) (FK → order.id)" in tree_labels(tables.child(2))
+    assert tree_labels(views) == ["customer_summary", "order_totals"]
+    assert "idx_customers_email on customers (UNIQUE)" in tree_labels(indexes)
+    
+    # Views browse like tables
+    window.tree_item_clicked(views.child(1), 0)
+    pump(app, lambda: window.table_model.rowCount() == 100)
+    assert window.table_model.columns[:2] == ["order_id", "customer"]
+    assert window.total_rows_label.text() == "Total: 400 rows"
+
+
+def test_follow_foreign_key(app, window, errors):
+    assert window.load_database(SAMPLE_DB)
+    window.select_table("order_items")
+    pump(app, lambda: window.table_model.rowCount() == 100)
+    
+    model = window.table_model
+    order_id_column = model.columns.index("order_id")
+    # Find a row whose order id is a prefix of other ids, so a substring match would be wrong
+    row = next(r for r in range(model.rowCount()) if model.rows[r][order_id_column] == 4)
+    index = model.index(row, order_id_column)
+    assert window.reference_for(window.table_view, index) == ("order", "id", 4)
+    assert window.reference_for(window.table_view, model.index(row, 0)) is None  # id is not an FK
+    
+    window.follow_reference("order", "id", 4)
+    pump(app, lambda: window.total_rows_label.text() == "Total: 1 rows")
+    assert window.current_table == "order"
+    assert window.table_model.rows[0][0] == 4
+    assert window.column_combo.currentText() == "id" and window.exact_checkbox.isChecked()
+    assert window.tree_widget.currentItem().text(0) == "order"
+    
+    # Unticking Exact falls back to a substring match
+    window.exact_checkbox.setChecked(False)
+    pump(app, lambda: window.total_rows_label.text() != "Total: 1 rows")
+    assert int(window.total_rows_label.text().split()[1]) > 1
+    
+    window.clear_filter()
+    pump(app, lambda: window.total_rows_label.text() == "Total: 400 rows")
+    assert not errors
+
+
+def test_cell_details(app, window):
+    assert window.load_database(SAMPLE_DB)
+    window.select_table("products")
+    pump(app, lambda: window.table_model.rowCount() == 25)
+    model = window.table_model
+    assert not window.detail_dock.isVisible()
+    
+    image_column = model.columns.index("image")
+    window.open_details(window.table_view, model.index(0, image_column))
+    assert window.detail_dock.isVisible()
+    assert window.detail_summary.text().startswith("image: BLOB, ")
+    assert "16x16 image" in window.detail_summary.text()
+    assert window.detail_image.isVisible()
+    assert window.detail_text.toPlainText().startswith("00000000  89 50 4e 47")
+    
+    # Selecting another cell updates the pane; row 7 has no image
+    window.table_view.setCurrentIndex(model.index(6, image_column))
+    assert window.detail_summary.text() == "image: NULL"
+    assert not window.detail_image.isVisible()
+    
+    window.select_table("customers")
+    pump(app, lambda: window.table_model.columns[:1] == ["id"] and window.table_model.rowCount() == 60)
+    assert window.detail_summary.text() == "Select a cell to see its full contents"
+    prefs = window.table_model.columns.index("preferences")
+    row = next(r for r in range(60) if window.table_model.rows[r][prefs])
+    window.table_view.setCurrentIndex(window.table_model.index(row, prefs))
+    assert "JSON text" in window.detail_summary.text()
+    assert window.detail_text.toPlainText().startswith("{\n  ")
+
+
+def test_drop_file_opens_database(app, window, db_path):
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(db_path)])
+    event = QDropEvent(QPointF(10, 10), Qt.DropAction.CopyAction, mime,
+                       Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    window.dropEvent(event)
+    assert window.db_path == db_path
+    assert window.tree_widget.topLevelItem(0).text(0) == "gui test.db"

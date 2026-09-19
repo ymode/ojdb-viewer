@@ -207,6 +207,8 @@ $RECYCLE.BIN/
 *.db
 *.sqlite
 *.sqlite3
+# ...except the sample database shipped with the app (built by tools/make_test_db.py)
+!/test.db
 
 # Temporary extraction directories
 OJDBViewer-*-portable/
