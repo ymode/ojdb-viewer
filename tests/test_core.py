@@ -1,11 +1,8 @@
 import csv
 import os
 import sqlite3
-import sys
 
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ojdb_core import (build_table_queries, build_where, connect_readonly,
                        export_csv, format_cell, quote_ident, validate_database)
