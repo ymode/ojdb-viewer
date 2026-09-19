@@ -19,8 +19,20 @@ fi
 
 # Install system dependencies
 echo "📦 Installing system dependencies..."
-apt update
-apt install -y python3 python3-pip python3-venv python3-pyqt5 libqt5gui5t64 qt5-gtk-platformtheme
+if command -v pacman >/dev/null 2>&1; then
+    # Arch / Omarchy / Manjaro. qt5-wayland gives native Wayland (Hyprland) support
+    pacman -S --needed --noconfirm python python-pyqt5 qt5-wayland desktop-file-utils
+elif command -v apt-get >/dev/null 2>&1; then
+    # Debian / Ubuntu
+    apt-get update
+    apt-get install -y python3 python3-venv python3-pyqt5 desktop-file-utils
+elif command -v dnf >/dev/null 2>&1; then
+    # Fedora
+    dnf install -y python3 python3-qt5 desktop-file-utils
+else
+    echo "⚠️ Unknown package manager - skipping system packages."
+    echo "   Make sure python3 (with venv) is installed; PyQt5 will be installed with pip."
+fi
 
 # Create installation directory
 echo "📁 Creating installation directory..."
@@ -37,9 +49,11 @@ cp README.md "$INSTALL_DIR/"
 # Create virtual environment and install dependencies
 echo "🐍 Setting up Python environment..."
 cd "$INSTALL_DIR"
-python3 -m venv venv
-source venv/bin/activate
-pip install PyQt5
+# Reuse the distro's PyQt5 when present; fall back to pip otherwise
+python3 -m venv --system-site-packages venv
+if ! venv/bin/python -c "import PyQt5.QtWidgets" >/dev/null 2>&1; then
+    venv/bin/pip install -r requirements.txt
+fi
 
 # Create launcher script
 echo "🚀 Creating launcher script..."
@@ -70,7 +84,9 @@ EOF
 
 # Update desktop database
 echo "🔄 Updating desktop database..."
-update-desktop-database
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database
+fi
 
 # Set permissions
 echo "🔐 Setting permissions..."

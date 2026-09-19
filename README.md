@@ -98,6 +98,7 @@ Install system-wide with desktop integration:
 ```bash
 sudo ./install.sh
 ```
+Supported: Arch-based distros (Arch, Omarchy, Manjaro) via `pacman`, Debian/Ubuntu via `apt`, and Fedora via `dnf`. On anything else the script skips system packages and installs PyQt5 with pip.
 This creates:
 - Menu entry: Applications → Development → OJDB Viewer
 - Terminal command: `ojdb-viewer`

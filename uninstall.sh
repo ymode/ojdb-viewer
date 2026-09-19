@@ -43,7 +43,9 @@ fi
 
 # Update desktop database
 echo "🔄 Updating desktop database..."
-update-desktop-database
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database
+fi
 
 echo ""
 echo "✅ OJDB Viewer uninstalled successfully!" 
