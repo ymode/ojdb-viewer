@@ -1,16 +1,16 @@
 #!/bin/bash
-# SQLite Browser Startup Script
+# OJDB Viewer Startup Script
+
+# Resolve the app directory without cd, so relative database paths still work
+DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 
 # Check if virtual environment exists
-if [ ! -d "venv" ]; then
+if [ ! -d "$DIR/venv" ]; then
     echo "Creating virtual environment..."
-    python3 -m venv venv
-    source venv/bin/activate
+    python3 -m venv "$DIR/venv"
     echo "Installing dependencies..."
-    pip install PyQt5
-else
-    source venv/bin/activate
+    "$DIR/venv/bin/pip" install -r "$DIR/requirements.txt"
 fi
 
-echo "Starting SQLite Browser..."
-python sqlite_browser.py 
+echo "Starting OJDB Viewer..."
+exec "$DIR/venv/bin/python" "$DIR/sqlite_browser.py" "$@"

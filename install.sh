@@ -29,6 +29,7 @@ mkdir -p "$INSTALL_DIR"
 # Copy files
 echo "📋 Copying application files..."
 cp sqlite_browser.py "$INSTALL_DIR/"
+cp ojdb_core.py "$INSTALL_DIR/"
 cp requirements.txt "$INSTALL_DIR/"
 cp icon.png "$INSTALL_DIR/"
 cp README.md "$INSTALL_DIR/"
@@ -44,9 +45,8 @@ pip install PyQt5
 echo "🚀 Creating launcher script..."
 cat > "$LAUNCHER_SCRIPT" << 'EOF'
 #!/bin/bash
-cd /opt/ojdb-viewer
-source venv/bin/activate
-python sqlite_browser.py "$@"
+# No cd: relative database paths must resolve from the caller's directory
+exec /opt/ojdb-viewer/venv/bin/python /opt/ojdb-viewer/sqlite_browser.py "$@"
 EOF
 
 chmod +x "$LAUNCHER_SCRIPT"
@@ -59,7 +59,7 @@ Version=1.0
 Type=Application
 Name=OJDB Viewer
 Comment=Our Jank Database Viewer - Browse and explore SQLite database files
-Exec=$LAUNCHER_SCRIPT
+Exec=$LAUNCHER_SCRIPT %f
 Icon=$INSTALL_DIR/icon.png
 Terminal=false
 Categories=Development;Database;
