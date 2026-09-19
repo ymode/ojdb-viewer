@@ -6,15 +6,18 @@ A Python Qt5 application for browsing SQLite database files.
 
 import sys
 import os
+import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,
+                             QHBoxLayout, QPushButton, QTableView, QAbstractItemView,
                              QTreeWidget, QTreeWidgetItem, QSplitter, QFileDialog,
                              QMessageBox, QLineEdit, QLabel, QHeaderView, QTabWidget,
-                             QTextEdit, QComboBox, QSpinBox, QStatusBar)
-from PyQt5.QtCore import Qt, QSettings, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon
+                             QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QStatusBar,
+                             QShortcut)
+from PyQt5.QtCore import (Qt, QAbstractTableModel, QModelIndex, QSettings, QThread, QTimer,
+                          pyqtSignal)
+from PyQt5.QtGui import QColor, QFont, QIcon, QKeySequence
 
-from ojdb_core import (build_table_queries, connect_readonly, export_csv, format_cell,
+from ojdb_core import (build_table_queries, connect_readonly, csv_value, export_csv, format_cell,
                        quote_ident, validate_database)
 
 
@@ -52,6 +55,160 @@ class DatabaseWorker(QThread):
                 conn.close()
 
 
+class QueryWorker(QThread):
+    """Worker thread that runs a user-written SQL statement"""
+    query_done = pyqtSignal(int, list, list, bool, float)  # request_id, rows, column_names, truncated, seconds
+    error_occurred = pyqtSignal(int, str)  # request_id, message
+    
+    def __init__(self, request_id, db_path, sql, max_rows):
+        super().__init__()
+        self.request_id = request_id
+        self.db_path = db_path
+        self.sql = sql
+        self.max_rows = max_rows
+        self.conn = None
+    
+    def cancel(self):
+        """Abort the running statement; safe to call from the UI thread"""
+        conn = self.conn
+        if conn:
+            try:
+                conn.interrupt()
+            except Exception:
+                pass  # The query finished and closed the connection first
+    
+    def run(self):
+        try:
+            started = time.monotonic()
+            self.conn = connect_readonly(self.db_path)
+            cursor = self.conn.execute(self.sql)
+            
+            column_names = [description[0] for description in cursor.description] if cursor.description else []
+            rows = cursor.fetchmany(self.max_rows + 1) if column_names else []
+            truncated = len(rows) > self.max_rows
+            
+            self.query_done.emit(self.request_id, rows[:self.max_rows], column_names,
+                                 truncated, time.monotonic() - started)
+        except Exception as e:
+            self.error_occurred.emit(self.request_id, str(e))
+        finally:
+            conn, self.conn = self.conn, None
+            if conn:
+                conn.close()
+
+
+class ResultModel(QAbstractTableModel):
+    """Read-only table model over a list of result rows"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rows = []
+        self.columns = []
+        self.row_offset = 0
+        self.placeholder_font = QFont()
+        self.placeholder_font.setItalic(True)
+        self.placeholder_color = QColor("#888")
+    
+    def set_results(self, rows, columns, row_offset=0):
+        """Replace the model contents; row_offset numbers rows across pages"""
+        self.beginResetModel()
+        self.rows = rows
+        self.columns = columns
+        self.row_offset = row_offset
+        self.endResetModel()
+    
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.rows)
+    
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.columns)
+    
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        value = self.rows[index.row()][index.column()]
+        if role == Qt.DisplayRole:
+            return format_cell(value)[0]
+        # Distinguish NULL/BLOB markers from real text
+        if role == Qt.FontRole and format_cell(value)[1]:
+            return self.placeholder_font
+        if role == Qt.ForegroundRole and format_cell(value)[1]:
+            return self.placeholder_color
+        return None
+    
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            return self.columns[section]
+        return str(self.row_offset + section + 1)
+    
+    def copy_text(self, index):
+        """Clipboard text for a cell: NULL is empty, BLOBs are hex"""
+        return str(csv_value(self.rows[index.row()][index.column()]))
+
+
+def create_result_view(model):
+    """Create a read-only table view with Ctrl+C support"""
+    view = QTableView()
+    view.setModel(model)
+    view.setAlternatingRowColors(True)
+    view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    view.verticalHeader().setDefaultSectionSize(25)  # Row height
+    copy_shortcut = QShortcut(QKeySequence.Copy, view)
+    copy_shortcut.setContext(Qt.WidgetShortcut)
+    copy_shortcut.activated.connect(lambda: copy_selection(view))
+    return view
+
+
+def copy_selection(view):
+    """Copy the selected cells to the clipboard as tab-separated text"""
+    indexes = view.selectionModel().selectedIndexes()
+    if not indexes:
+        return
+    model = view.model()
+    rows = sorted({index.row() for index in indexes})
+    columns = sorted({index.column() for index in indexes})
+    selected = {(index.row(), index.column()) for index in indexes}
+    lines = []
+    for row in rows:
+        lines.append("\t".join(
+            model.copy_text(model.index(row, col)) if (row, col) in selected else ""
+            for col in columns))
+    QApplication.clipboard().setText("\n".join(lines))
+
+
+def size_columns(view, column_names):
+    """Fit columns to their content within sensible limits"""
+    header = view.horizontalHeader()
+    
+    # Auto-resize columns to content, but with constraints
+    view.resizeColumnsToContents()
+    
+    # Set reasonable column width limits
+    for col in range(len(column_names)):
+        current_width = view.columnWidth(col)
+        # Set minimum and maximum widths
+        min_width = max(80, len(column_names[col]) * 8)  # Based on header text
+        max_width = 300  # Maximum column width
+        
+        if current_width < min_width:
+            view.setColumnWidth(col, min_width)
+        elif current_width > max_width:
+            view.setColumnWidth(col, max_width)
+    
+    # Set resize modes
+    header.setSectionResizeMode(QHeaderView.Interactive)
+    
+    # If we have extra space, distribute it among columns
+    total_width = sum(view.columnWidth(col) for col in range(len(column_names)))
+    available_width = view.viewport().width()
+    
+    if total_width < available_width and len(column_names) > 0:
+        # Stretch the last column to fill remaining space
+        header.setSectionResizeMode(len(column_names) - 1, QHeaderView.Stretch)
+
+
 class ExportWorker(QThread):
     """Worker thread that writes the current view to a CSV file"""
     export_done = pyqtSignal(str, int)  # out_path, row_count
@@ -72,6 +229,7 @@ class ExportWorker(QThread):
 
 
 MAX_RECENT_FILES = 10
+MAX_QUERY_ROWS = 10000  # Cap on rows shown for a user-written query
 
 
 class SQLiteBrowser(QMainWindow):
@@ -88,6 +246,8 @@ class SQLiteBrowser(QMainWindow):
         self.request_id = 0  # Results from older requests are discarded
         self.workers = set()  # Keep running threads referenced until they finish
         self.settings = QSettings()
+        self.query_request_id = 0
+        self.query_worker = None
         
         # Debounce typing so each keystroke doesn't start a query
         self.search_timer = QTimer(self)
@@ -134,6 +294,9 @@ class SQLiteBrowser(QMainWindow):
         
         # Data tab
         self.create_data_tab()
+        
+        # Query tab
+        self.create_query_tab()
         
         # Schema tab
         self.create_schema_tab()
@@ -326,6 +489,7 @@ class SQLiteBrowser(QMainWindow):
                          "• Browse database structure\n"
                          "• View table data with pagination\n"
                          "• Search and filter data\n"
+                         "• Run read-only SQL queries\n"
                          "• Export data to CSV\n"
                          "• View database schema\n\n"
                          "Built with Python and PyQt5")
@@ -362,17 +526,15 @@ class SQLiteBrowser(QMainWindow):
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
         
-        # Table widget
-        self.table_widget = QTableWidget()
+        # Table view
+        self.table_model = ResultModel(self)
+        self.table_view = create_result_view(self.table_model)
         # Sorting is done in SQL so it covers the whole table, not just this page
-        self.table_widget.setSortingEnabled(False)
-        self.table_widget.horizontalHeader().setSectionsClickable(True)
-        self.table_widget.horizontalHeader().sectionClicked.connect(self.header_clicked)
-        self.table_widget.setAlternatingRowColors(True)
-        self.table_widget.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table_widget.horizontalHeader().setStretchLastSection(True)
-        self.table_widget.verticalHeader().setDefaultSectionSize(25)  # Row height
-        layout.addWidget(self.table_widget)
+        self.table_view.setSortingEnabled(False)
+        self.table_view.horizontalHeader().setSectionsClickable(True)
+        self.table_view.horizontalHeader().sectionClicked.connect(self.header_clicked)
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        layout.addWidget(self.table_view)
         
         # Pagination controls
         pagination_layout = QHBoxLayout()
@@ -413,6 +575,124 @@ class SQLiteBrowser(QMainWindow):
         
         self.tab_widget.addTab(data_widget, "Data")
     
+    def create_query_tab(self):
+        """Create the SQL query tab"""
+        query_widget = QWidget()
+        layout = QVBoxLayout(query_widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        
+        query_splitter = QSplitter(Qt.Vertical)
+        query_splitter.setChildrenCollapsible(False)
+        layout.addWidget(query_splitter)
+        
+        # Editor with run controls
+        editor_widget = QWidget()
+        editor_layout = QVBoxLayout(editor_widget)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(8)
+        
+        self.query_input = QPlainTextEdit()
+        self.query_input.setFont(QFont("Courier", 10))
+        self.query_input.setPlaceholderText(
+            "Write a single SQL statement and press Ctrl+Enter to run it.\n"
+            "The database is opened read-only, so statements that modify it will fail.")
+        editor_layout.addWidget(self.query_input)
+        
+        controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(10)
+        
+        self.run_query_button = QPushButton("Run")
+        self.run_query_button.setToolTip("Run the statement (Ctrl+Enter)")
+        self.run_query_button.clicked.connect(self.run_or_cancel_query)
+        self.run_query_button.setMaximumWidth(100)
+        controls_layout.addWidget(self.run_query_button)
+        
+        self.query_status = QLabel("")
+        self.query_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.query_status.setWordWrap(True)
+        controls_layout.addWidget(self.query_status, 1)
+        
+        editor_layout.addLayout(controls_layout)
+        query_splitter.addWidget(editor_widget)
+        
+        for keys in ("Ctrl+Return", "Ctrl+Enter"):
+            shortcut = QShortcut(QKeySequence(keys), self.query_input)
+            shortcut.setContext(Qt.WidgetShortcut)
+            shortcut.activated.connect(self.run_query)
+        
+        # Results
+        self.query_model = ResultModel(self)
+        self.query_view = create_result_view(self.query_model)
+        query_splitter.addWidget(self.query_view)
+        
+        query_splitter.setSizes([200, 500])
+        query_splitter.setStretchFactor(0, 0)
+        query_splitter.setStretchFactor(1, 1)
+        
+        self.tab_widget.addTab(query_widget, "Query")
+    
+    def set_query_status(self, message, is_error=False):
+        """Show a message beside the Run button"""
+        self.query_status.setStyleSheet("color: #c0392b;" if is_error else "color: #666;")
+        self.query_status.setText(message)
+    
+    def run_or_cancel_query(self):
+        """Run button doubles as Cancel while a query is running"""
+        if self.query_worker:
+            self.query_worker.cancel()
+        else:
+            self.run_query()
+    
+    def run_query(self):
+        """Run the statement in the query editor"""
+        if self.query_worker:
+            return
+        if not self.db_path:
+            self.set_query_status("No database loaded", is_error=True)
+            return
+        sql = self.query_input.toPlainText().strip()
+        if not sql:
+            return
+        
+        self.query_request_id += 1
+        worker = QueryWorker(self.query_request_id, self.db_path, sql, MAX_QUERY_ROWS)
+        worker.query_done.connect(self.query_finished)
+        worker.error_occurred.connect(self.query_failed)
+        worker.finished.connect(lambda w=worker: self.query_worker_finished(w))
+        self.workers.add(worker)
+        self.query_worker = worker
+        self.run_query_button.setText("Cancel")
+        self.set_query_status("Running...")
+        worker.start()
+    
+    def query_worker_finished(self, worker):
+        """Re-arm the Run button once the query thread has stopped"""
+        if self.query_worker is worker:
+            self.query_worker = None
+            self.run_query_button.setText("Run")
+        self.worker_finished(worker)
+    
+    def query_finished(self, request_id, rows, column_names, truncated, seconds):
+        """Show query results unless the database changed underneath them"""
+        if request_id != self.query_request_id:
+            return
+        self.query_model.set_results(rows, column_names)
+        size_columns(self.query_view, column_names)
+        
+        if not column_names:
+            message = f"Statement returned no result set ({seconds:.3f}s)"
+        elif truncated:
+            message = f"Showing first {len(rows)} rows ({seconds:.3f}s) - add a LIMIT to narrow the results"
+        else:
+            message = f"{len(rows)} rows ({seconds:.3f}s)"
+        self.set_query_status(message)
+    
+    def query_failed(self, request_id, error_message):
+        """Show a query error inline rather than in a popup"""
+        if request_id == self.query_request_id:
+            self.set_query_status(error_message, is_error=True)
+    
     def create_schema_tab(self):
         """Create the schema viewing tab"""
         self.schema_text = QTextEdit()
@@ -448,8 +728,13 @@ class SQLiteBrowser(QMainWindow):
             self.current_table = None
             self.current_columns = []
             self.request_id += 1  # Drop results still in flight for the old database
-            self.table_widget.setRowCount(0)
-            self.table_widget.setColumnCount(0)
+            self.table_model.set_results([], [])
+            # Results from the previous database no longer apply
+            self.query_request_id += 1
+            if self.query_worker:
+                self.query_worker.cancel()
+            self.query_model.set_results([], [])
+            self.set_query_status("")
             self.export_action.setEnabled(False)
             self.add_recent_file(self.db_path)
             db_name = os.path.basename(db_path)
@@ -588,9 +873,9 @@ class SQLiteBrowser(QMainWindow):
     
     def header_clicked(self, index):
         """Sort by the clicked column, toggling direction on repeat clicks"""
-        if not self.current_table or index >= self.table_widget.columnCount():
+        if not self.current_table or index >= len(self.table_model.columns):
             return
-        column = self.table_widget.horizontalHeaderItem(index).text()
+        column = self.table_model.columns[index]
         if column == self.sort_column:
             self.sort_descending = not self.sort_descending
         else:
@@ -600,60 +885,18 @@ class SQLiteBrowser(QMainWindow):
         self.load_table_data()
     
     def populate_table(self, data, column_names):
-        """Populate table widget with data"""
-        self.table_widget.setRowCount(len(data))
-        self.table_widget.setColumnCount(len(column_names))
-        self.table_widget.setHorizontalHeaderLabels(column_names)
-        
-        for row_idx, row_data in enumerate(data):
-            for col_idx, value in enumerate(row_data):
-                text, is_placeholder = format_cell(value)
-                item = QTableWidgetItem(text)
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # Make read-only
-                if is_placeholder:
-                    # Distinguish NULL/BLOB markers from real text
-                    font = item.font()
-                    font.setItalic(True)
-                    item.setFont(font)
-                    item.setForeground(QColor("#888"))
-                self.table_widget.setItem(row_idx, col_idx, item)
-        
-        # Improve column sizing
-        header = self.table_widget.horizontalHeader()
-        
-        # Auto-resize columns to content, but with constraints
-        self.table_widget.resizeColumnsToContents()
-        
-        # Set reasonable column width limits
-        for col in range(len(column_names)):
-            current_width = self.table_widget.columnWidth(col)
-            # Set minimum and maximum widths
-            min_width = max(80, len(column_names[col]) * 8)  # Based on header text
-            max_width = 300  # Maximum column width
-            
-            if current_width < min_width:
-                self.table_widget.setColumnWidth(col, min_width)
-            elif current_width > max_width:
-                self.table_widget.setColumnWidth(col, max_width)
-        
-        # Set resize modes
-        header.setSectionResizeMode(QHeaderView.Interactive)
+        """Show a page of table data"""
+        self.table_model.set_results(data, column_names, self.current_offset)
+        size_columns(self.table_view, column_names)
         
         # Show which column the query is sorted by
+        header = self.table_view.horizontalHeader()
         if self.sort_column in column_names:
             header.setSortIndicator(column_names.index(self.sort_column),
                                     Qt.DescendingOrder if self.sort_descending else Qt.AscendingOrder)
             header.setSortIndicatorShown(True)
         else:
             header.setSortIndicatorShown(False)
-        
-        # If we have extra space, distribute it among columns
-        total_width = sum(self.table_widget.columnWidth(col) for col in range(len(column_names)))
-        available_width = self.table_widget.viewport().width()
-        
-        if total_width < available_width and len(column_names) > 0:
-            # Stretch the last column to fill remaining space
-            header.setSectionResizeMode(len(column_names) - 1, QHeaderView.Stretch)
         
         # Update status with database info
         db_name = os.path.basename(self.db_path) if self.db_path else "Unknown"
@@ -742,6 +985,8 @@ class SQLiteBrowser(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("splitterState", self.splitter.saveState())
         for worker in list(self.workers):
+            if hasattr(worker, "cancel"):
+                worker.cancel()  # Don't let a runaway query block exit
             worker.wait()
         super().closeEvent(event)
 

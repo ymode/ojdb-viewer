@@ -8,6 +8,8 @@ A Python Qt5 application for browsing and exploring SQLite database files.
 - **Database structure view** - See all tables and columns in a tree view
 - **Data browsing** - View table contents with pagination
 - **Search and filtering** - Search within specific columns or across all text columns
+- **SQL query tab** - Run your own read-only SQL and browse the results
+- **Copy to clipboard** - Ctrl+C copies the selected rows or cells as tab-separated text
 - **CSV export** - Export the current table view, with filter and sort applied, to CSV
 - **Recent files** - Reopen databases from File → Open Recent; window layout is remembered between sessions
 - **Schema viewer** - View the complete database schema (CREATE statements)
@@ -48,6 +50,12 @@ python sqlite_browser.py
 - NULL values and BLOBs are shown as grey italic `NULL` / `<BLOB size>` markers
 - Navigate through large datasets using the Previous/Next pagination buttons
 - Adjust rows per page using the spinner control
+
+### Running Queries
+- Open the "Query" tab, write a single SQL statement and press Ctrl+Enter (or click Run)
+- The database is opened read-only, so `INSERT`, `UPDATE`, `DELETE` and similar statements fail with an error instead of changing the file
+- Results are capped at 10,000 rows; add a `LIMIT` or `WHERE` to narrow them
+- While a query is running the Run button becomes Cancel
 
 ### Exporting Data
 - Tools → Export Data (Ctrl+E) writes every row of the current view to a CSV file, not just the visible page
