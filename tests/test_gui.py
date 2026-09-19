@@ -5,10 +5,10 @@ import time
 
 import pytest
 
-pytest.importorskip("PyQt5.QtWidgets")
+pytest.importorskip("PyQt6.QtWidgets")
 
-from PyQt5.QtCore import QSettings, Qt
-from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 import sqlite_browser as sb
 
@@ -46,7 +46,7 @@ def db_path(tmp_path):
 @pytest.fixture
 def window(app, errors, tmp_path):
     # Keep settings out of the real user config
-    QSettings.setPath(QSettings.NativeFormat, QSettings.UserScope, str(tmp_path / "config"))
+    QSettings.setPath(QSettings.Format.NativeFormat, QSettings.Scope.UserScope, str(tmp_path / "config"))
     window = sb.SQLiteBrowser()
     window.show()
     yield window
@@ -88,7 +88,7 @@ def test_browse_table(app, window, db_path, errors):
     assert cell(window.table_model, 1, 3) == "<BLOB 2 B>"
     
     window.next_page()
-    pump(app, lambda: window.table_model.headerData(0, Qt.Vertical) == "101")
+    pump(app, lambda: window.table_model.headerData(0, Qt.Orientation.Vertical) == "101")
     assert not errors
 
 

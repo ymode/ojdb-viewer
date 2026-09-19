@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
 OJDB Viewer (Our Jank Database Viewer)
-A Python Qt5 application for browsing SQLite database files.
+A Python Qt6 application for browsing SQLite database files.
 """
 
 import sys
 import os
 import time
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QTableView, QAbstractItemView,
                              QTreeWidget, QTreeWidgetItem, QSplitter, QFileDialog,
                              QMessageBox, QLineEdit, QLabel, QHeaderView, QTabWidget,
-                             QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QStatusBar,
-                             QShortcut)
-from PyQt5.QtCore import (Qt, QAbstractTableModel, QModelIndex, QSettings, QThread, QTimer,
+                             QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QStatusBar)
+from PyQt6.QtCore import (Qt, QAbstractTableModel, QModelIndex, QSettings, QThread, QTimer,
                           pyqtSignal)
-from PyQt5.QtGui import QColor, QFont, QIcon, QKeySequence
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut
 
 from ojdb_core import (build_table_queries, connect_readonly, csv_value, export_csv, format_cell,
                        quote_ident, validate_database)
@@ -123,23 +122,23 @@ class ResultModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.columns)
     
-    def data(self, index, role=Qt.DisplayRole):
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
         value = self.rows[index.row()][index.column()]
-        if role == Qt.DisplayRole:
+        if role == Qt.ItemDataRole.DisplayRole:
             return format_cell(value)[0]
         # Distinguish NULL/BLOB markers from real text
-        if role == Qt.FontRole and format_cell(value)[1]:
+        if role == Qt.ItemDataRole.FontRole and format_cell(value)[1]:
             return self.placeholder_font
-        if role == Qt.ForegroundRole and format_cell(value)[1]:
+        if role == Qt.ItemDataRole.ForegroundRole and format_cell(value)[1]:
             return self.placeholder_color
         return None
     
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role != Qt.DisplayRole:
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role != Qt.ItemDataRole.DisplayRole:
             return None
-        if orientation == Qt.Horizontal:
+        if orientation == Qt.Orientation.Horizontal:
             return self.columns[section]
         return str(self.row_offset + section + 1)
     
@@ -153,10 +152,10 @@ def create_result_view(model):
     view = QTableView()
     view.setModel(model)
     view.setAlternatingRowColors(True)
-    view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     view.verticalHeader().setDefaultSectionSize(25)  # Row height
-    copy_shortcut = QShortcut(QKeySequence.Copy, view)
-    copy_shortcut.setContext(Qt.WidgetShortcut)
+    copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, view)
+    copy_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
     copy_shortcut.activated.connect(lambda: copy_selection(view))
     return view
 
@@ -198,7 +197,7 @@ def size_columns(view, column_names):
             view.setColumnWidth(col, max_width)
     
     # Set resize modes
-    header.setSectionResizeMode(QHeaderView.Interactive)
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     
     # If we have extra space, distribute it among columns
     total_width = sum(view.columnWidth(col) for col in range(len(column_names)))
@@ -206,7 +205,7 @@ def size_columns(view, column_names):
     
     if total_width < available_width and len(column_names) > 0:
         # Stretch the last column to fill remaining space
-        header.setSectionResizeMode(len(column_names) - 1, QHeaderView.Stretch)
+        header.setSectionResizeMode(len(column_names) - 1, QHeaderView.ResizeMode.Stretch)
 
 
 class ExportWorker(QThread):
@@ -274,7 +273,7 @@ class SQLiteBrowser(QMainWindow):
         main_layout.setSpacing(5)  # Minimal spacing
         
         # Create splitter for tree and content (no database info bar!)
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)  # Prevent collapsing
         main_layout.addWidget(splitter)
         self.splitter = splitter
@@ -481,10 +480,9 @@ class SQLiteBrowser(QMainWindow):
     
     def show_about(self):
         """Show about dialog"""
-        from PyQt5.QtWidgets import QMessageBox
         QMessageBox.about(self, "About OJDB Viewer (Our Jank Database Viewer)", 
                          "OJDB Viewer v1.0\n\n"
-                         "A Python Qt5 application for browsing SQLite databases.\n\n"
+                         "A Python Qt6 application for browsing SQLite databases.\n\n"
                          "Features:\n"
                          "• Browse database structure\n"
                          "• View table data with pagination\n"
@@ -492,7 +490,7 @@ class SQLiteBrowser(QMainWindow):
                          "• Run read-only SQL queries\n"
                          "• Export data to CSV\n"
                          "• View database schema\n\n"
-                         "Built with Python and PyQt5")
+                         "Built with Python and PyQt6")
     
     def create_data_tab(self):
         """Create the data viewing tab"""
@@ -533,7 +531,7 @@ class SQLiteBrowser(QMainWindow):
         self.table_view.setSortingEnabled(False)
         self.table_view.horizontalHeader().setSectionsClickable(True)
         self.table_view.horizontalHeader().sectionClicked.connect(self.header_clicked)
-        self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         layout.addWidget(self.table_view)
         
         # Pagination controls
@@ -548,7 +546,7 @@ class SQLiteBrowser(QMainWindow):
         
         self.page_label = QLabel("Page 1")
         self.page_label.setMinimumWidth(80)
-        self.page_label.setAlignment(Qt.AlignCenter)
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pagination_layout.addWidget(self.page_label)
         
         self.next_button = QPushButton("Next ▶")
@@ -582,7 +580,7 @@ class SQLiteBrowser(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         
-        query_splitter = QSplitter(Qt.Vertical)
+        query_splitter = QSplitter(Qt.Orientation.Vertical)
         query_splitter.setChildrenCollapsible(False)
         layout.addWidget(query_splitter)
         
@@ -609,7 +607,7 @@ class SQLiteBrowser(QMainWindow):
         controls_layout.addWidget(self.run_query_button)
         
         self.query_status = QLabel("")
-        self.query_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.query_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.query_status.setWordWrap(True)
         controls_layout.addWidget(self.query_status, 1)
         
@@ -618,7 +616,7 @@ class SQLiteBrowser(QMainWindow):
         
         for keys in ("Ctrl+Return", "Ctrl+Enter"):
             shortcut = QShortcut(QKeySequence(keys), self.query_input)
-            shortcut.setContext(Qt.WidgetShortcut)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
             shortcut.activated.connect(self.run_query)
         
         # Results
@@ -775,7 +773,7 @@ class SQLiteBrowser(QMainWindow):
             for table_name, in tables:
                 table_item = QTreeWidgetItem(tables_item)
                 table_item.setText(0, table_name)
-                table_item.setData(0, Qt.UserRole, {'type': 'table', 'name': table_name})
+                table_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'table', 'name': table_name})
                 
                 # Get column info
                 cursor.execute(f"PRAGMA table_info({quote_ident(table_name)})")
@@ -789,7 +787,7 @@ class SQLiteBrowser(QMainWindow):
                     
                     column_item = QTreeWidgetItem(table_item)
                     column_item.setText(0, f"{col_name}: {col_type}{is_pk}{is_nullable}")
-                    column_item.setData(0, Qt.UserRole, {'type': 'column', 'table': table_name, 'name': col_name})
+                    column_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'column', 'table': table_name, 'name': col_name})
             
             conn.close()
             
@@ -820,7 +818,7 @@ class SQLiteBrowser(QMainWindow):
     
     def tree_item_clicked(self, item, column):
         """Handle tree item click"""
-        data = item.data(0, Qt.UserRole)
+        data = item.data(0, Qt.ItemDataRole.UserRole)
         if data and data.get('type') == 'table':
             self.current_table = data['name']
             self.current_offset = 0
@@ -893,7 +891,7 @@ class SQLiteBrowser(QMainWindow):
         header = self.table_view.horizontalHeader()
         if self.sort_column in column_names:
             header.setSortIndicator(column_names.index(self.sort_column),
-                                    Qt.DescendingOrder if self.sort_descending else Qt.AscendingOrder)
+                                    Qt.SortOrder.DescendingOrder if self.sort_descending else Qt.SortOrder.AscendingOrder)
             header.setSortIndicatorShown(True)
         else:
             header.setSortIndicatorShown(False)
@@ -1007,7 +1005,7 @@ def main():
     if args:
         window.load_database(args[0])
     
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ description = "OJDB Viewer (Our Jank Database Viewer) - browse and explore SQLit
 readme = "README.md"
 license = { text = "Unlicense" }
 requires-python = ">=3.9"
-dependencies = ["PyQt5>=5.15.0"]
+dependencies = ["PyQt6>=6.4"]
 
 [project.optional-dependencies]
 test = ["pytest"]

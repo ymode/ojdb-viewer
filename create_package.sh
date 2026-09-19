@@ -82,7 +82,7 @@ FIRST RUN:
 ---------
 On first run, the script will automatically:
 1. Create a virtual environment
-2. Download and install PyQt5
+2. Download and install PyQt6
 3. Launch the application
 
 This may take a few minutes on the first run.
