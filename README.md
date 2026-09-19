@@ -34,13 +34,16 @@ python sqlite_browser.py
 ## Usage
 
 ### Opening a Database
-- Use File → Open Database menu or the application will automatically load `devices.db` if present
+- Use File → Open Database menu, or pass a file on the command line: `python sqlite_browser.py path/to/file.db`
+- Databases are opened read-only; the viewer never creates or modifies files
 - Select any SQLite database file (.db, .sqlite, .sqlite3)
 
 ### Browsing Data
 - Click on any table name in the left tree view to load its data
 - Use the search box to filter data by entering search terms
-- Select a specific column to search within, or leave "All Columns" to search all text fields
+- Select a specific column to search within, or leave "All Columns" to search every column
+- Click a column header to sort the whole table by that column (click again to reverse)
+- NULL values and BLOBs are shown as grey italic `NULL` / `<BLOB size>` markers
 - Navigate through large datasets using the Previous/Next pagination buttons
 - Adjust rows per page using the spinner control
 
@@ -63,6 +66,13 @@ The application includes support for the provided `devices.db` which contains:
 - Communication capabilities
 - Physical characteristics
 - Standards references
+
+## Running the Tests
+
+```bash
+pip install pytest
+pytest tests
+```
 
 ## Technical Details
 
@@ -88,6 +98,7 @@ Install system-wide with desktop integration:
 ```bash
 sudo ./install.sh
 ```
+Supported: Arch-based distros (Arch, Omarchy, Manjaro) via `pacman`, Debian/Ubuntu via `apt`, and Fedora via `dnf`. On anything else the script skips system packages and installs PyQt5 with pip.
 This creates:
 - Menu entry: Applications → Development → OJDB Viewer
 - Terminal command: `ojdb-viewer`
@@ -118,7 +129,7 @@ The executable will be in the `dist/` directory.
 ### For Developers
 
 #### Desktop Integration Only
-To create just a desktop entry for the current installation:
+To create just a desktop entry (expects an `ojdb-viewer` command on your PATH, as created by `install.sh`):
 ```bash
 cp ojdb-viewer.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications/

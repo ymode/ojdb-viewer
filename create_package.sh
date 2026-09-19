@@ -15,6 +15,7 @@ mkdir -p "$PACKAGE_NAME"
 # Copy essential files
 echo "📋 Copying files..."
 cp sqlite_browser.py "$PACKAGE_NAME/"
+cp ojdb_core.py "$PACKAGE_NAME/"
 cp requirements.txt "$PACKAGE_NAME/"
 cp icon.png "$PACKAGE_NAME/"
 cp README.md "$PACKAGE_NAME/"

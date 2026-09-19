@@ -5,41 +5,51 @@ A Python Qt5 application for browsing SQLite database files.
 """
 
 import sys
-import sqlite3
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,
                              QTreeWidget, QTreeWidgetItem, QSplitter, QFileDialog,
                              QMessageBox, QLineEdit, QLabel, QHeaderView, QTabWidget,
                              QTextEdit, QComboBox, QSpinBox, QStatusBar)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QIcon
+
+from ojdb_core import (build_table_queries, connect_readonly, format_cell,
+                       quote_ident, validate_database)
 
 
 class DatabaseWorker(QThread):
     """Worker thread for database operations to prevent UI freezing"""
-    data_ready = pyqtSignal(list, list)  # data, column_names
-    error_occurred = pyqtSignal(str)
+    data_ready = pyqtSignal(int, list, list, int)  # request_id, data, column_names, total_rows
+    error_occurred = pyqtSignal(int, str)  # request_id, message
     
-    def __init__(self, db_path, query, params=None):
+    def __init__(self, request_id, db_path, query, count_query, params=None):
         super().__init__()
+        self.request_id = request_id
         self.db_path = db_path
         self.query = query
+        self.count_query = count_query
         self.params = params or []
     
     def run(self):
+        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_readonly(self.db_path)
             cursor = conn.cursor()
             cursor.execute(self.query, self.params)
             
             data = cursor.fetchall()
             column_names = [description[0] for description in cursor.description] if cursor.description else []
             
-            conn.close()
-            self.data_ready.emit(data, column_names)
+            cursor.execute(self.count_query, self.params)
+            total_rows = cursor.fetchone()[0]
+            
+            self.data_ready.emit(self.request_id, data, column_names, total_rows)
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            self.error_occurred.emit(self.request_id, str(e))
+        finally:
+            if conn:
+                conn.close()
 
 
 class SQLiteBrowser(QMainWindow):
@@ -50,6 +60,17 @@ class SQLiteBrowser(QMainWindow):
         self.current_offset = 0
         self.rows_per_page = 100
         self.updating_combo = False  # Flag to prevent recursion
+        self.current_columns = []
+        self.sort_column = None
+        self.sort_descending = False
+        self.request_id = 0  # Results from older requests are discarded
+        self.workers = set()  # Keep running threads referenced until they finish
+        
+        # Debounce typing so each keystroke doesn't start a query
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(250)
+        self.search_timer.timeout.connect(self.apply_filter)
         
         self.init_ui()
         
@@ -105,9 +126,6 @@ class SQLiteBrowser(QMainWindow):
         # Initialize status bar
         self.update_status_bar("No database loaded")
         
-        # Load example database if it exists
-        if os.path.exists("devices.db"):
-            self.load_database("devices.db")
     
     def create_menu_bar(self):
         """Create the application menu bar"""
@@ -208,7 +226,7 @@ class SQLiteBrowser(QMainWindow):
         filter_layout.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Enter search term...")
-        self.search_input.textChanged.connect(self.apply_filter)
+        self.search_input.textChanged.connect(self.search_timer.start)
         self.search_input.setMinimumWidth(200)
         filter_layout.addWidget(self.search_input)
         
@@ -228,7 +246,10 @@ class SQLiteBrowser(QMainWindow):
         
         # Table widget
         self.table_widget = QTableWidget()
-        self.table_widget.setSortingEnabled(True)
+        # Sorting is done in SQL so it covers the whole table, not just this page
+        self.table_widget.setSortingEnabled(False)
+        self.table_widget.horizontalHeader().setSectionsClickable(True)
+        self.table_widget.horizontalHeader().sectionClicked.connect(self.header_clicked)
         self.table_widget.setAlternatingRowColors(True)
         self.table_widget.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_widget.horizontalHeader().setStretchLastSection(True)
@@ -300,11 +321,14 @@ class SQLiteBrowser(QMainWindow):
     def load_database(self, db_path):
         """Load database and populate tree"""
         try:
-            # Test connection
-            conn = sqlite3.connect(db_path)
-            conn.close()
+            validate_database(db_path)
             
-            self.db_path = db_path
+            self.db_path = os.path.abspath(db_path)
+            self.current_table = None
+            self.current_columns = []
+            self.request_id += 1  # Drop results still in flight for the old database
+            self.table_widget.setRowCount(0)
+            self.table_widget.setColumnCount(0)
             db_name = os.path.basename(db_path)
             self.populate_tree()
             self.load_schema()
@@ -321,7 +345,7 @@ class SQLiteBrowser(QMainWindow):
         self.tree_widget.clear()
         
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_readonly(self.db_path)
             cursor = conn.cursor()
             
             # Get all tables
@@ -344,7 +368,7 @@ class SQLiteBrowser(QMainWindow):
                 table_item.setData(0, Qt.UserRole, {'type': 'table', 'name': table_name})
                 
                 # Get column info
-                cursor.execute(f"PRAGMA table_info({table_name})")
+                cursor.execute(f"PRAGMA table_info({quote_ident(table_name)})")
                 columns = cursor.fetchall()
                 
                 for column_info in columns:
@@ -368,7 +392,7 @@ class SQLiteBrowser(QMainWindow):
             return
         
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_readonly(self.db_path)
             cursor = conn.cursor()
             
             cursor.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
@@ -390,6 +414,9 @@ class SQLiteBrowser(QMainWindow):
         if data and data.get('type') == 'table':
             self.current_table = data['name']
             self.current_offset = 0
+            self.sort_column = None
+            self.sort_descending = False
+            self.update_column_combo()
             self.load_table_data()
             self.tab_widget.setCurrentIndex(0)  # Switch to data tab
     
@@ -398,72 +425,53 @@ class SQLiteBrowser(QMainWindow):
         if not self.db_path or not self.current_table:
             return
         
-        # Update column combo for filtering
-        self.update_column_combo()
+        self.search_timer.stop()
         
-        # Build query
-        query = f"SELECT * FROM {self.current_table}"
-        params = []
-        
-        # Apply search filter if active
-        search_text = self.search_input.text().strip()
-        selected_column = self.column_combo.currentText()
-        
-        if search_text and selected_column and selected_column != "All Columns":
-            query += f" WHERE {selected_column} LIKE ?"
-            params.append(f"%{search_text}%")
-        elif search_text:
-            # Search all text columns
-            try:
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute(f"PRAGMA table_info({self.current_table})")
-                columns = cursor.fetchall()
-                conn.close()
-                
-                text_columns = [col[1] for col in columns if col[2].upper() in ['TEXT', 'VARCHAR', 'CHAR']]
-                if text_columns:
-                    conditions = [f"{col} LIKE ?" for col in text_columns]
-                    query += f" WHERE {' OR '.join(conditions)}"
-                    params.extend([f"%{search_text}%" for _ in text_columns])
-            except:
-                pass
-        
-        # Add pagination
-        query += f" LIMIT {self.rows_per_page} OFFSET {self.current_offset}"
+        query, count_query, params = build_table_queries(
+            self.current_table, self.current_columns,
+            search_text=self.search_input.text(),
+            selected_column=self.column_combo.currentText(),
+            order_by=self.sort_column, descending=self.sort_descending,
+            limit=self.rows_per_page, offset=self.current_offset)
         
         # Execute query in worker thread
-        self.worker = DatabaseWorker(self.db_path, query, params)
-        self.worker.data_ready.connect(self.populate_table)
-        self.worker.error_occurred.connect(self.show_error)
-        self.worker.start()
-        
-        # Get total count for pagination
-        count_query = f"SELECT COUNT(*) FROM {self.current_table}"
-        count_params = []
-        
-        if search_text and selected_column and selected_column != "All Columns":
-            count_query += f" WHERE {selected_column} LIKE ?"
-            count_params.append(f"%{search_text}%")
-        elif search_text:
-            try:
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute(f"PRAGMA table_info({self.current_table})")
-                columns = cursor.fetchall()
-                conn.close()
-                
-                text_columns = [col[1] for col in columns if col[2].upper() in ['TEXT', 'VARCHAR', 'CHAR']]
-                if text_columns:
-                    conditions = [f"{col} LIKE ?" for col in text_columns]
-                    count_query += f" WHERE {' OR '.join(conditions)}"
-                    count_params.extend([f"%{search_text}%" for _ in text_columns])
-            except:
-                pass
-        
-        self.count_worker = DatabaseWorker(self.db_path, count_query, count_params)
-        self.count_worker.data_ready.connect(self.update_pagination_info)
-        self.count_worker.start()
+        self.request_id += 1
+        worker = DatabaseWorker(self.request_id, self.db_path, query, count_query, params)
+        worker.data_ready.connect(self.handle_results)
+        worker.error_occurred.connect(self.handle_error)
+        worker.finished.connect(lambda w=worker: self.worker_finished(w))
+        self.workers.add(worker)
+        worker.start()
+    
+    def worker_finished(self, worker):
+        """Release a finished worker thread"""
+        self.workers.discard(worker)
+        worker.deleteLater()
+    
+    def handle_results(self, request_id, data, column_names, total_rows):
+        """Show query results unless a newer request has superseded them"""
+        if request_id != self.request_id:
+            return
+        self.populate_table(data, column_names)
+        self.update_pagination_info(total_rows)
+    
+    def handle_error(self, request_id, error_message):
+        """Show a query error unless a newer request has superseded it"""
+        if request_id == self.request_id:
+            self.show_error(error_message)
+    
+    def header_clicked(self, index):
+        """Sort by the clicked column, toggling direction on repeat clicks"""
+        if not self.current_table or index >= self.table_widget.columnCount():
+            return
+        column = self.table_widget.horizontalHeaderItem(index).text()
+        if column == self.sort_column:
+            self.sort_descending = not self.sort_descending
+        else:
+            self.sort_column = column
+            self.sort_descending = False
+        self.current_offset = 0
+        self.load_table_data()
     
     def populate_table(self, data, column_names):
         """Populate table widget with data"""
@@ -473,8 +481,15 @@ class SQLiteBrowser(QMainWindow):
         
         for row_idx, row_data in enumerate(data):
             for col_idx, value in enumerate(row_data):
-                item = QTableWidgetItem(str(value) if value is not None else "")
+                text, is_placeholder = format_cell(value)
+                item = QTableWidgetItem(text)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # Make read-only
+                if is_placeholder:
+                    # Distinguish NULL/BLOB markers from real text
+                    font = item.font()
+                    font.setItalic(True)
+                    item.setFont(font)
+                    item.setForeground(QColor("#888"))
                 self.table_widget.setItem(row_idx, col_idx, item)
         
         # Improve column sizing
@@ -498,6 +513,14 @@ class SQLiteBrowser(QMainWindow):
         # Set resize modes
         header.setSectionResizeMode(QHeaderView.Interactive)
         
+        # Show which column the query is sorted by
+        if self.sort_column in column_names:
+            header.setSortIndicator(column_names.index(self.sort_column),
+                                    Qt.DescendingOrder if self.sort_descending else Qt.AscendingOrder)
+            header.setSortIndicatorShown(True)
+        else:
+            header.setSortIndicatorShown(False)
+        
         # If we have extra space, distribute it among columns
         total_width = sum(self.table_widget.columnWidth(col) for col in range(len(column_names)))
         available_width = self.table_widget.viewport().width()
@@ -520,16 +543,17 @@ class SQLiteBrowser(QMainWindow):
             # Set flag to prevent recursion
             self.updating_combo = True
             
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_readonly(self.db_path)
             cursor = conn.cursor()
-            cursor.execute(f"PRAGMA table_info({self.current_table})")
+            cursor.execute(f"PRAGMA table_info({quote_ident(self.current_table)})")
             columns = cursor.fetchall()
             conn.close()
             
+            self.current_columns = [column_info[1] for column_info in columns]
+            
             self.column_combo.clear()
             self.column_combo.addItem("All Columns")
-            for column_info in columns:
-                self.column_combo.addItem(column_info[1])  # column name
+            self.column_combo.addItems(self.current_columns)
                 
         except Exception as e:
             print(f"Error updating column combo: {e}")
@@ -537,18 +561,16 @@ class SQLiteBrowser(QMainWindow):
             # Always reset flag
             self.updating_combo = False
     
-    def update_pagination_info(self, data, column_names):
+    def update_pagination_info(self, total_rows):
         """Update pagination controls with total count"""
-        if data:
-            total_rows = data[0][0]
-            current_page = (self.current_offset // self.rows_per_page) + 1
-            total_pages = (total_rows + self.rows_per_page - 1) // self.rows_per_page
-            
-            self.page_label.setText(f"Page {current_page} of {total_pages}")
-            self.total_rows_label.setText(f"Total: {total_rows} rows")
-            
-            self.prev_button.setEnabled(self.current_offset > 0)
-            self.next_button.setEnabled(self.current_offset + self.rows_per_page < total_rows)
+        current_page = (self.current_offset // self.rows_per_page) + 1
+        total_pages = max(1, (total_rows + self.rows_per_page - 1) // self.rows_per_page)
+        
+        self.page_label.setText(f"Page {current_page} of {total_pages}")
+        self.total_rows_label.setText(f"Total: {total_rows} rows")
+        
+        self.prev_button.setEnabled(self.current_offset > 0)
+        self.next_button.setEnabled(self.current_offset + self.rows_per_page < total_rows)
     
     def previous_page(self):
         """Go to previous page"""
@@ -576,8 +598,10 @@ class SQLiteBrowser(QMainWindow):
     
     def clear_filter(self):
         """Clear search filter"""
+        self.updating_combo = True  # Reload once below, not once per widget
         self.search_input.clear()
         self.column_combo.setCurrentIndex(0)
+        self.updating_combo = False
         if self.current_table:
             self.current_offset = 0
             self.load_table_data()
@@ -585,6 +609,13 @@ class SQLiteBrowser(QMainWindow):
     def show_error(self, error_message):
         """Show error message"""
         QMessageBox.critical(self, "Database Error", error_message)
+    
+    def closeEvent(self, event):
+        """Let running queries finish so their threads aren't destroyed mid-run"""
+        self.search_timer.stop()
+        for worker in list(self.workers):
+            worker.wait()
+        super().closeEvent(event)
 
 
 def main():
@@ -597,6 +628,11 @@ def main():
     
     window = SQLiteBrowser()
     window.show()
+    
+    # Open a database passed on the command line (e.g. via "Open With")
+    args = app.arguments()[1:]
+    if args:
+        window.load_database(args[0])
     
     sys.exit(app.exec_())
 
