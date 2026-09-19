@@ -26,24 +26,20 @@ cat > "$PACKAGE_NAME/run_portable.sh" << 'EOF'
 #!/bin/bash
 # Portable OJDB Viewer Launcher
 
-# Get script directory
+# Resolve the app directory without cd, so relative database paths still work
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$DIR"
 
 # Check if virtual environment exists
-if [ ! -d "venv" ]; then
+if [ ! -d "$DIR/venv" ]; then
     echo "🔧 First-time setup: Creating virtual environment..."
-    python3 -m venv venv
-    source venv/bin/activate
+    python3 -m venv "$DIR/venv"
     echo "📦 Installing dependencies..."
-    pip install PyQt5
+    "$DIR/venv/bin/pip" install -r "$DIR/requirements.txt"
     echo "✅ Setup complete!"
-else
-    source venv/bin/activate
 fi
 
 echo "🚀 Starting OJDB Viewer..."
-python sqlite_browser.py "$@"
+exec "$DIR/venv/bin/python" "$DIR/sqlite_browser.py" "$@"
 EOF
 
 chmod +x "$PACKAGE_NAME/run_portable.sh"
@@ -51,21 +47,19 @@ chmod +x "$PACKAGE_NAME/run_portable.sh"
 # Create Windows batch file
 cat > "$PACKAGE_NAME/run_portable.bat" << 'EOF'
 @echo off
-cd /d "%~dp0"
+rem No cd, so relative database paths still work
+set "DIR=%~dp0"
 
-if not exist "venv" (
+if not exist "%DIR%venv" (
     echo First-time setup: Creating virtual environment...
-    python -m venv venv
-    call venv\Scripts\activate.bat
+    python -m venv "%DIR%venv"
     echo Installing dependencies...
-    pip install PyQt5
+    "%DIR%venv\Scripts\pip.exe" install -r "%DIR%requirements.txt"
     echo Setup complete!
-) else (
-    call venv\Scripts\activate.bat
 )
 
 echo Starting OJDB Viewer...
-python sqlite_browser.py %*
+"%DIR%venv\Scripts\python.exe" "%DIR%sqlite_browser.py" %*
 pause
 EOF
 

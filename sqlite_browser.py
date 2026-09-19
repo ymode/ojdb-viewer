@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SQLite Database Browser
+OJDB Viewer (Our Jank Database Viewer)
 A Python Qt5 application for browsing SQLite database files.
 """
 
@@ -11,10 +11,10 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTreeWidget, QTreeWidgetItem, QSplitter, QFileDialog,
                              QMessageBox, QLineEdit, QLabel, QHeaderView, QTabWidget,
                              QTextEdit, QComboBox, QSpinBox, QStatusBar)
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QSettings, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon
 
-from ojdb_core import (build_table_queries, connect_readonly, format_cell,
+from ojdb_core import (build_table_queries, connect_readonly, export_csv, format_cell,
                        quote_ident, validate_database)
 
 
@@ -52,6 +52,28 @@ class DatabaseWorker(QThread):
                 conn.close()
 
 
+class ExportWorker(QThread):
+    """Worker thread that writes the current view to a CSV file"""
+    export_done = pyqtSignal(str, int)  # out_path, row_count
+    error_occurred = pyqtSignal(str)
+    
+    def __init__(self, db_path, out_path, **view):
+        super().__init__()
+        self.db_path = db_path
+        self.out_path = out_path
+        self.view = view
+    
+    def run(self):
+        try:
+            row_count = export_csv(self.db_path, self.out_path, **self.view)
+            self.export_done.emit(self.out_path, row_count)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+MAX_RECENT_FILES = 10
+
+
 class SQLiteBrowser(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -65,6 +87,7 @@ class SQLiteBrowser(QMainWindow):
         self.sort_descending = False
         self.request_id = 0  # Results from older requests are discarded
         self.workers = set()  # Keep running threads referenced until they finish
+        self.settings = QSettings()
         
         # Debounce typing so each keystroke doesn't start a query
         self.search_timer = QTimer(self)
@@ -94,6 +117,7 @@ class SQLiteBrowser(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)  # Prevent collapsing
         main_layout.addWidget(splitter)
+        self.splitter = splitter
         
         # Create database tree widget
         self.tree_widget = QTreeWidget()
@@ -126,6 +150,14 @@ class SQLiteBrowser(QMainWindow):
         # Initialize status bar
         self.update_status_bar("No database loaded")
         
+        # Restore window layout from the last session
+        geometry = self.settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        splitter_state = self.settings.value("splitterState")
+        if splitter_state:
+            self.splitter.restoreState(splitter_state)
+        
     
     def create_menu_bar(self):
         """Create the application menu bar"""
@@ -142,9 +174,9 @@ class SQLiteBrowser(QMainWindow):
         
         file_menu.addSeparator()
         
-        # Recent files submenu (placeholder for future enhancement)
-        recent_menu = file_menu.addMenu('Recent Files')
-        recent_menu.addAction('No recent files').setEnabled(False)
+        # Recent files submenu
+        self.recent_menu = file_menu.addMenu('Open &Recent')
+        self.update_recent_menu()
         
         file_menu.addSeparator()
         
@@ -165,10 +197,12 @@ class SQLiteBrowser(QMainWindow):
         
         tools_menu.addSeparator()
         
-        # Export data action (placeholder for future enhancement)
-        export_action = tools_menu.addAction('&Export Data...')
-        export_action.setStatusTip('Export table data to CSV')
-        export_action.setEnabled(False)  # Disabled for now
+        # Export data action, enabled once a table is selected
+        self.export_action = tools_menu.addAction('&Export Data...')
+        self.export_action.setShortcut('Ctrl+E')
+        self.export_action.setStatusTip('Export the current table view (all pages) to CSV')
+        self.export_action.triggered.connect(self.export_data)
+        self.export_action.setEnabled(False)
         
         # View menu
         view_menu = menubar.addMenu('&View')
@@ -184,8 +218,91 @@ class SQLiteBrowser(QMainWindow):
         
         # About action
         about_action = help_menu.addAction('&About')
-        about_action.setStatusTip('About SQLite Browser')
+        about_action.setStatusTip('About OJDB Viewer')
         about_action.triggered.connect(self.show_about)
+    
+    def recent_files(self):
+        """Recently opened database paths, newest first"""
+        files = self.settings.value("recentFiles") or []
+        if isinstance(files, str):  # QSettings returns a bare string for one entry
+            files = [files]
+        return list(files)
+    
+    def add_recent_file(self, db_path):
+        """Move db_path to the top of the recent files list"""
+        files = [f for f in self.recent_files() if f != db_path]
+        files.insert(0, db_path)
+        self.settings.setValue("recentFiles", files[:MAX_RECENT_FILES])
+        self.update_recent_menu()
+    
+    def remove_recent_file(self, db_path):
+        """Drop db_path from the recent files list"""
+        self.settings.setValue("recentFiles", [f for f in self.recent_files() if f != db_path])
+        self.update_recent_menu()
+    
+    def clear_recent_files(self):
+        """Empty the recent files list"""
+        self.settings.setValue("recentFiles", [])
+        self.update_recent_menu()
+    
+    def update_recent_menu(self):
+        """Rebuild the recent files submenu"""
+        self.recent_menu.clear()
+        files = self.recent_files()
+        if not files:
+            self.recent_menu.addAction('No recent files').setEnabled(False)
+            return
+        
+        for index, path in enumerate(files, start=1):
+            action = self.recent_menu.addAction(f"&{index % 10}  {path.replace('&', '&&')}")
+            action.setStatusTip(path)
+            action.triggered.connect(lambda checked=False, p=path: self.open_recent_file(p))
+        
+        self.recent_menu.addSeparator()
+        self.recent_menu.addAction('&Clear Recent Files').triggered.connect(self.clear_recent_files)
+    
+    def open_recent_file(self, db_path):
+        """Open a recent file, forgetting it if it can no longer be opened"""
+        if not self.load_database(db_path):
+            self.remove_recent_file(db_path)
+    
+    def export_data(self):
+        """Export every row of the current view (filter and sort applied) to CSV"""
+        if not self.db_path or not self.current_table:
+            return
+        
+        default_dir = self.settings.value("exportDir") or os.path.dirname(self.db_path)
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Data", os.path.join(default_dir, f"{self.current_table}.csv"),
+            "CSV Files (*.csv);;All Files (*)")
+        if not out_path:
+            return
+        self.settings.setValue("exportDir", os.path.dirname(out_path))
+        
+        worker = ExportWorker(
+            self.db_path, out_path,
+            table=self.current_table, columns=self.current_columns,
+            search_text=self.search_input.text(),
+            selected_column=self.column_combo.currentText(),
+            order_by=self.sort_column, descending=self.sort_descending)
+        worker.export_done.connect(self.export_finished)
+        worker.error_occurred.connect(self.export_failed)
+        worker.finished.connect(lambda w=worker: self.worker_finished(w))
+        self.workers.add(worker)
+        self.export_action.setEnabled(False)  # One export at a time
+        self.update_status_bar(f"Exporting '{self.current_table}'...", os.path.basename(self.db_path))
+        worker.start()
+    
+    def export_finished(self, out_path, row_count):
+        """Report a completed export"""
+        self.export_action.setEnabled(self.current_table is not None)
+        db_name = os.path.basename(self.db_path) if self.db_path else None
+        self.update_status_bar(f"Exported {row_count} rows to {out_path}", db_name)
+    
+    def export_failed(self, error_message):
+        """Report a failed export"""
+        self.export_action.setEnabled(self.current_table is not None)
+        QMessageBox.critical(self, "Export Error", f"Failed to export data:\n{error_message}")
     
     def refresh_database(self):
         """Refresh the database structure"""
@@ -209,6 +326,7 @@ class SQLiteBrowser(QMainWindow):
                          "• Browse database structure\n"
                          "• View table data with pagination\n"
                          "• Search and filter data\n"
+                         "• Export data to CSV\n"
                          "• View database schema\n\n"
                          "Built with Python and PyQt5")
     
@@ -304,8 +422,11 @@ class SQLiteBrowser(QMainWindow):
     
     def open_database(self):
         """Open file dialog to select database"""
+        # Start in the folder of the most recent database
+        recent = self.recent_files()
+        start_dir = os.path.dirname(recent[0]) if recent else ""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open SQLite Database", "", "SQLite Files (*.db *.sqlite *.sqlite3);;All Files (*)")
+            self, "Open SQLite Database", start_dir, "SQLite Files (*.db *.sqlite *.sqlite3);;All Files (*)")
         
         if file_path:
             self.load_database(file_path)
@@ -319,7 +440,7 @@ class SQLiteBrowser(QMainWindow):
         self.status_bar.showMessage(status_text)
     
     def load_database(self, db_path):
-        """Load database and populate tree"""
+        """Load database and populate tree; returns True on success"""
         try:
             validate_database(db_path)
             
@@ -329,13 +450,17 @@ class SQLiteBrowser(QMainWindow):
             self.request_id += 1  # Drop results still in flight for the old database
             self.table_widget.setRowCount(0)
             self.table_widget.setColumnCount(0)
+            self.export_action.setEnabled(False)
+            self.add_recent_file(self.db_path)
             db_name = os.path.basename(db_path)
             self.populate_tree()
             self.load_schema()
             self.update_status_bar(f"Loaded successfully", db_name)
+            return True
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open database:\n{str(e)}")
+            return False
     
     def populate_tree(self):
         """Populate tree widget with database structure"""
@@ -417,6 +542,7 @@ class SQLiteBrowser(QMainWindow):
             self.sort_column = None
             self.sort_descending = False
             self.update_column_combo()
+            self.export_action.setEnabled(True)
             self.load_table_data()
             self.tab_widget.setCurrentIndex(0)  # Switch to data tab
     
@@ -613,6 +739,8 @@ class SQLiteBrowser(QMainWindow):
     def closeEvent(self, event):
         """Let running queries finish so their threads aren't destroyed mid-run"""
         self.search_timer.stop()
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("splitterState", self.splitter.saveState())
         for worker in list(self.workers):
             worker.wait()
         super().closeEvent(event)
@@ -622,9 +750,9 @@ def main():
     app = QApplication(sys.argv)
     
     # Set application properties
-    app.setApplicationName("SQLite Browser")
+    app.setApplicationName("OJDB Viewer")
     app.setApplicationVersion("1.0")
-    app.setOrganizationName("SQLite Browser")
+    app.setOrganizationName("OJDB Viewer")
     
     window = SQLiteBrowser()
     window.show()
